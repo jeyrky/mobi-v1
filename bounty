@@ -1,0 +1,529 @@
+local Players = game:GetService("Players")
+
+-- [FIX] Chờ PlayerGui load xong
+repeat task.wait() until Players.LocalPlayer
+local LocalPlayer = Players.LocalPlayer
+repeat task.wait() until LocalPlayer:FindFirstChild("PlayerGui")
+
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
+local TweenService = game:GetService("TweenService")
+
+-- [[ AUTO TRAVEL DRESSROSA ]] --
+task.spawn(function()
+    task.wait(2) -- Chờ 2s để game load Remote
+    pcall(function()
+        print(">>> [AUTO] Sending TravelDressrosa Request...")
+        game:GetService("ReplicatedStorage").Remotes.CommF_:InvokeServer("TravelDressrosa")
+    end)
+end)
+
+print(">>> TP-PVP-Multi Script Loading...") 
+
+-- [[ CẤU HÌNH ]] --
+-- Bạn có thể thêm bao nhiêu tọa độ tùy thích vào danh sách này.
+-- Script sẽ tự động chạy hết danh sách rồi mới đổi acc.
+local LOCATIONS = {
+    CFrame.new(-248.04, 73.06, 187.18), -- Tọa độ 1
+    CFrame.new(-410.13, 73, 82.97),     -- Tọa độ 2
+    CFrame.new(-534.35, 73.06, 196.49), -- Tọa độ 3
+    -- CFrame.new(x, y, z), -- Tọa độ 4 (ví dụ)
+    -- CFrame.new(x, y, z), -- Tọa độ 5 (ví dụ)
+}
+
+local CONFIG = {
+    Team = "Pirates", -- Tự động chọn Hải Tặc
+}
+
+local CurrentLocIndex = 1
+local DeathCount = 0 -- Số lần chết tại tọa độ hiện tại
+local MAX_DEATHS_PER_LOC = 3 -- Số lần chết mỗi tọa độ
+local isRunning = true
+local hasResetStats = false
+
+-- [[ UI HIỂN THỊ TRẠNG THÁI ]] --
+local function CreateStatusUI()
+    local ScreenGui = Instance.new("ScreenGui")
+    ScreenGui.Name = "PVPStatusUI"
+    
+    pcall(function() ScreenGui.Parent = game:GetService("CoreGui") end)
+    if not ScreenGui.Parent then
+        if LocalPlayer:FindFirstChild("PlayerGui") then
+            ScreenGui.Parent = LocalPlayer.PlayerGui
+        end
+    end
+    
+    local Frame = Instance.new("Frame")
+    Frame.Size = UDim2.new(0, 250, 0, 70)
+    Frame.Position = UDim2.new(0.5, -125, 0.1, 0)
+    Frame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    Frame.BackgroundTransparency = 0.5
+    Frame.Parent = ScreenGui
+    
+    local Label = Instance.new("TextLabel")
+    Label.Size = UDim2.new(1, 0, 1, 0)
+    Label.BackgroundTransparency = 1
+    Label.TextColor3 = Color3.fromRGB(0, 255, 255)
+    Label.TextSize = 18
+    pcall(function() Label.Font = Enum.Font.SourceSansBold end)
+    if Label.Font == nil then Label.Font = Enum.Font.SourceSans end
+    Label.TextWrapped = true
+    Label.Text = "Đang tải..."
+    Label.Parent = Frame
+    
+    return Label
+end
+
+local StatusLabel = CreateStatusUI()
+
+local function UpdateUI()
+    if CurrentLocIndex > #LOCATIONS then
+        StatusLabel.Text = "HOÀN THÀNH -> ĐANG ĐỔI ACC..."
+        StatusLabel.TextColor3 = Color3.fromRGB(255, 0, 0)
+    else
+        StatusLabel.Text = string.format("Vị trí: %d/%d\nSố lần chết: %d/%d", 
+            CurrentLocIndex, #LOCATIONS, DeathCount, MAX_DEATHS_PER_LOC)
+        StatusLabel.TextColor3 = Color3.fromRGB(0, 255, 255)
+    end
+end
+
+-- [[ HÀM HỖ TRỢ GỬI TÍN HIỆU ]] --
+local function SendChangeAccountSignal()
+    print(">>> [CHANGE ACCOUNT] Đã hoàn thành 3 tọa độ! Gửi tín hiệu đổi tài khoản...")
+    
+    if getgenv and getgenv().SignalChangeAccount then
+        getgenv().SignalChangeAccount()
+        return
+    end
+
+    local pkgName = "Unknown"
+    pcall(function()
+        if isfile and isfile("appStorage.json") then
+             local c = readfile("appStorage.json")
+             local data = HttpService:JSONDecode(c)
+             if data and data.PkgName then pkgName = data.PkgName end
+        end
+    end)
+    
+    local body = HttpService:JSONEncode({
+        package = pkgName,
+        signal = "ChangeAccount",
+        nonce = tostring(math.random(100000, 999999)),
+        Account = LocalPlayer.Name
+    })
+    
+    local reqFunc = (syn and syn.request) or (http and http.request) or http_request or request or (fluxus and fluxus.request)
+    if reqFunc then
+        task.spawn(function()
+            pcall(function()
+                reqFunc({Url = "http://127.0.0.1:8000/signal", Method = "POST", Headers = {["Content-Type"] = "application/json"}, Body = body})
+            end)
+        end)
+        task.spawn(function()
+            pcall(function()
+                reqFunc({Url = "http://10.0.2.2:8000/signal", Method = "POST", Headers = {["Content-Type"] = "application/json"}, Body = body})
+            end)
+        end)
+    end
+end
+
+-- [[ CÁC HÀM LOGIC GAME ]] --
+
+local function AutoChooseTeam()
+    local t0 = os.clock()
+    while LocalPlayer.Team == nil and (os.clock() - t0 < 60) do
+        pcall(function()
+            ReplicatedStorage.Remotes.CommF_:InvokeServer("SetTeam", CONFIG.Team)
+        end)
+        
+        if LocalPlayer.Team == nil then
+            -- Scan UI click logic (giữ nguyên từ bản gốc)
+             pcall(function()
+                for _, v in ipairs(game:GetService("CoreGui"):GetDescendants()) do
+                    if (v:IsA("TextButton") or v:IsA("ImageButton")) then
+                        if v.Name:lower():find("pirate") or (v:IsA("TextButton") and v.Text:lower():find("pirate")) then
+                            local vim = game:GetService("VirtualInputManager")
+                            local pos = v.AbsolutePosition + (v.AbsoluteSize/2)
+                            vim:SendMouseButtonEvent(pos.X, pos.Y, 0, true, v, 0)
+                            task.wait(0.05)
+                            vim:SendMouseButtonEvent(pos.X, pos.Y, 0, false, v, 0)
+                        end
+                    end
+                end
+            end)
+        end
+        task.wait(1)
+    end
+end
+
+local function EnablePVP()
+    -- print(">>> Đang kiểm tra/Bật PVP...")
+    pcall(function() ReplicatedStorage.Remotes.CommF_:InvokeServer("EnablePvp") end)
+    pcall(function() ReplicatedStorage.DefaultChatSystemChatEvents.SayMessageRequest:FireServer("/pvp", "All") end)
+end
+
+local function TweenFly(targetCFrame)
+    local char = LocalPlayer.Character
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+    
+    local root = char.HumanoidRootPart
+    local dist = (root.Position - targetCFrame.Position).Magnitude
+    
+    if dist <= 50 then return end
+
+    -- print(">>> Bay tới vị trí " .. CurrentLocIndex .. " (Dist: " .. math.floor(dist) .. ")")
+    
+    local speed = 300
+    local duration = dist / speed
+    local ti = TweenInfo.new(duration, Enum.EasingStyle.Linear)
+    local tween = TweenService:Create(root, ti, {CFrame = targetCFrame})
+    
+    local bv = Instance.new("BodyVelocity")
+    bv.Velocity = Vector3.zero
+    bv.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+    bv.Parent = root
+    
+    local noclipConn = RunService.Stepped:Connect(function()
+        if char then
+            for _, v in pairs(char:GetDescendants()) do
+                if v:IsA("BasePart") then v.CanCollide = false end
+            end
+            if root then root.Velocity = Vector3.zero end
+        end
+    end)
+    
+    tween:Play()
+    tween.Completed:Wait()
+    
+    if noclipConn then noclipConn:Disconnect() end
+    if bv then bv:Destroy() end
+end
+
+local function LockPositionLoop()
+    RunService.Stepped:Connect(function()
+        if not isRunning then return end
+        if CurrentLocIndex > #LOCATIONS then return end -- Đã xong hết thì không lock nữa
+        
+        local targetCFrame = LOCATIONS[CurrentLocIndex]
+        local char = LocalPlayer.Character
+        if char and char:FindFirstChild("HumanoidRootPart") and char:FindFirstChild("Humanoid") then
+            if char.Humanoid.Health > 0 then
+                local dist = (char.HumanoidRootPart.Position - targetCFrame.Position).Magnitude
+                if dist <= 50 then
+                    char.HumanoidRootPart.CFrame = targetCFrame
+                    char.HumanoidRootPart.Velocity = Vector3.zero
+                    char.HumanoidRootPart.RotVelocity = Vector3.zero
+                end
+            end
+        end
+    end)
+end
+
+-- [[ LOGIC CHÍNH ]] --
+
+local function OnCharacterAdded(char)
+    if CurrentLocIndex > #LOCATIONS then
+        print("Đã hoàn thành nhiệm vụ -> Chờ đổi acc...")
+        SendChangeAccountSignal()
+        return
+    end
+
+    UpdateUI()
+    task.wait(1)
+    AutoChooseTeam()
+    task.wait(0.5)
+    
+    task.wait(1)
+    EnablePVP()
+    
+    local hum = char:WaitForChild("Humanoid")
+    hum.Died:Connect(function()
+        DeathCount = DeathCount + 1
+        print(">>> Chết lần " .. DeathCount .. " tại vị trí " .. CurrentLocIndex)
+        
+        if DeathCount >= MAX_DEATHS_PER_LOC then
+            print(">>> Đã đủ " .. MAX_DEATHS_PER_LOC .. " lần chết tại vị trí " .. CurrentLocIndex)
+            CurrentLocIndex = CurrentLocIndex + 1
+            DeathCount = 0 -- Reset cho vị trí mới
+            
+            if CurrentLocIndex > #LOCATIONS then
+                print(">>> ĐÃ XONG CẢ " .. #LOCATIONS .. " TỌA ĐỘ -> KÍCH HOẠT ĐỔI ACC!")
+                isRunning = false
+                SendChangeAccountSignal()
+            else
+                print(">>> CHUYỂN SANG VỊ TRÍ SỐ: " .. CurrentLocIndex)
+            end
+        end
+        UpdateUI()
+    end)
+end
+
+LocalPlayer.CharacterAdded:Connect(OnCharacterAdded)
+
+task.spawn(function()
+    if LocalPlayer.Team == nil then AutoChooseTeam() end
+end)
+
+if LocalPlayer.Character then OnCharacterAdded(LocalPlayer.Character) end
+
+LockPositionLoop()
+
+-- Loop kiểm tra & Bay
+spawn(function()
+    while isRunning do
+        task.wait(1)
+        if CurrentLocIndex > #LOCATIONS then break end
+        
+        if os.time() % 5 == 0 then EnablePVP() end
+        
+        local char = LocalPlayer.Character
+        local targetCFrame = LOCATIONS[CurrentLocIndex]
+        
+        if char and char:FindFirstChild("HumanoidRootPart") and char:FindFirstChild("Humanoid") and char.Humanoid.Health > 0 then
+            local dist = (char.HumanoidRootPart.Position - targetCFrame.Position).Magnitude
+            if dist > 50 then
+                TweenFly(targetCFrame)
+            end
+        end
+    end
+end)
+
+-- [[ ONLINE CHECK INTEGRATION (From online.txt) ]] --
+task.spawn(function()
+    local HttpService = game:GetService("HttpService")
+    local BASE = "http://127.0.0.1:8000"
+    
+    -- 1. Detect Request Function (Executor dependent)
+    local req = (syn and syn.request) or (http and http.request) or http_request or request
+    
+    -- 2. Function to read Package Name and Server Type from appStorage.json
+    local SERVER_TYPE = "NORMAL"
+    local function readPkg()
+        local ok, content = pcall(readfile, "appStorage.json")
+        if ok and content then
+            local ok2, js = pcall(HttpService.JSONDecode, HttpService, content)
+            if ok2 and js then
+                 if js.ServerType then SERVER_TYPE = js.ServerType end
+                 if js.PkgName then return js.PkgName end
+            end
+        end
+        return nil -- Let Python handle if unknown
+    end
+    
+    local PKG = readPkg()
+    
+    -- 2.1 Check Kick Status
+    local function isKicked()
+        local success, result = pcall(function()
+            -- [Check 0] Player Removed
+            if not game.Players.LocalPlayer or not game.Players.LocalPlayer.Parent then
+                return true
+            end
+
+            local coreGui = game:GetService("CoreGui")
+            local promptGui = coreGui:FindFirstChild("RobloxPromptGui")
+            if not promptGui then return false end
+            
+            -- [Enhanced Check] Scan toàn bộ RobloxPromptGui thay vì chỉ promptOverlay
+            local kick_keywords = {
+                "kick", "disconnect", "security", "banned",
+                "mất kết nối", "mã lỗi", "error code",
+                "please rejoin", "not authorized", "maintenance",
+                "bảo trì", "internet", "connection",
+                "same account", "launch", "idle",
+                "chặn", "restricted", "đóng", "close",
+                "rời khỏi", "leave", "kết nối lại", "reconnect",
+                "277", "267", "268" -- Các mã lỗi phổ biến
+            }
+
+            for _, descendant in pairs(promptGui:GetDescendants()) do
+                 if descendant:IsA("TextLabel") or descendant:IsA("TextButton") then
+                    if descendant.Visible then
+                        local text = descendant.Text:lower()
+                        for _, kw in ipairs(kick_keywords) do
+                            if text:find(kw) then 
+                                return true 
+                            end
+                        end
+                    end
+                 end
+            end
+
+            return false
+        end)
+        if success and result then return true end
+        return false
+    end
+    
+    -- 3. Main Heartbeat Function
+    local KICK_SENT = false
+    
+    local function sendRequest(endpoint, data)
+        local url = BASE .. endpoint
+        local body = HttpService:JSONEncode(data)
+        local headers = {["Content-Type"] = "application/json"}
+        local success = false
+    
+        -- Method A: HttpService:RequestAsync (POST)
+        if not success then
+            pcall(function()
+                local response = HttpService:RequestAsync({
+                    Url = url,
+                    Method = "POST",
+                    Headers = headers,
+                    Body = body
+                })
+                if response.StatusCode == 200 then success = true end
+            end)
+        end
+    
+        -- Method B: Executor Request (POST)
+        if not success and req then
+            pcall(function()
+                local response = req({
+                    Url = url,
+                    Method = "POST",
+                    Headers = headers,
+                    Body = body
+                })
+                if response and response.StatusCode == 200 then success = true end
+            end)
+        end
+        
+        -- Method C: GET Fallback
+        if not success then
+            -- Convert data to query string roughly
+            local query = ""
+            for k,v in pairs(data) do
+                query = query .. "&" .. k .. "=" .. tostring(v)
+            end
+            pcall(function()
+                game:HttpGet(url .. "?" .. query)
+            end)
+        end
+    end
+    
+    local function sendHeartbeat()
+        -- Retry reading PKG if missing
+        if not PKG then PKG = readPkg() end
+    
+        -- Check if kicked
+        if isKicked() then
+            if not KICK_SENT then
+                print("DETECTED KICKED - SENDING SIGNAL TO SERVER...")
+                sendRequest("/signal", {package = PKG, signal = "Kicked"})
+                KICK_SENT = true
+            else
+                print("DETECTED KICKED - WAITING FOR RESTART...")
+            end
+            return
+        end
+    
+        local username = "Unknown"
+        pcall(function()
+            if game:GetService("Players").LocalPlayer then
+                username = game:GetService("Players").LocalPlayer.Name
+            end
+        end)
+        
+        -- Gửi Heartbeat
+        sendRequest("/heartbeat", {
+            package = PKG, 
+            username = username,
+            server_type = SERVER_TYPE
+        })
+    
+        -- Method D: AppStorage File Fallback
+        pcall(function()
+            local js = {}
+            local ok, content = pcall(readfile, "appStorage.json")
+            if ok and content and #content > 0 then
+                local ok2, data = pcall(HttpService.JSONDecode, HttpService, content)
+                if ok2 and type(data) == "table" then js = data end
+            end
+            js.Heartbeat = os.time()
+            js.username = username
+            if PKG and not js.PkgName then js.PkgName = PKG end
+            if not js.ServerType then js.ServerType = SERVER_TYPE end
+            writefile("appStorage.json", HttpService:JSONEncode(js))
+        end)
+    end
+    
+    -- 4. Auto-loop every 10 seconds
+    while true do
+        sendHeartbeat()
+        task.wait(10)
+    end
+end)
+
+-- [[ AUTO RESET HP INTEGRATION (From Reset50.txt) ]] --
+task.spawn(function()
+    local Players = game:GetService("Players")
+    local LocalPlayer = Players.LocalPlayer
+    local RunService = game:GetService("RunService")
+
+    print(">>> Đang khởi động Auto Reset HP (< 50%)...")
+
+    -- CẤU HÌNH
+    local HP_THRESHOLD_PERCENT = 80 -- Dưới 80% là Reset
+    local CHECK_DELAY = 5 -- Thời gian chờ giữa các lần check (để tránh spam)
+
+    -- UI (Đã ẩn theo yêu cầu)
+    pcall(function()
+        if game.CoreGui:FindFirstChild("AutoResetHP_UI") then game.CoreGui.AutoResetHP_UI:Destroy() end
+        if LocalPlayer.PlayerGui:FindFirstChild("AutoResetHP_UI") then LocalPlayer.PlayerGui.AutoResetHP_UI:Destroy() end
+    end)
+
+    -- LOGIC CHÍNH
+    local isResetting = false
+
+    local function CheckHP()
+        if isResetting then return end
+        
+        local char = LocalPlayer.Character
+        if not char then return end
+        
+        local hum = char:FindFirstChild("Humanoid")
+        if not hum or hum.Health <= 0 then return end
+        
+        local hp = hum.Health
+        local maxHp = hum.MaxHealth
+        local percent = (hp / maxHp) * 100
+        
+        if percent < HP_THRESHOLD_PERCENT then
+            isResetting = true
+            print(">>> Máu còn " .. math.floor(percent) .. "% -> Kích hoạt RESET!")
+            
+            -- Reset nhân vật
+            hum.Health = 0 -- Cách nhanh nhất để reset
+            
+            -- Đợi hồi sinh
+            task.wait(4) 
+            isResetting = false
+        end
+    end
+
+    -- Kết nối sự kiện thay đổi máu
+    local function OnCharacterAdded(char)
+        isResetting = false
+        local hum = char:WaitForChild("Humanoid", 10)
+        if hum then
+            hum.HealthChanged:Connect(CheckHP)
+        end
+    end
+
+    LocalPlayer.CharacterAdded:Connect(OnCharacterAdded)
+
+    if LocalPlayer.Character then
+        OnCharacterAdded(LocalPlayer.Character)
+    end
+
+    -- Vòng lặp phụ (Backup nếu event không nổ)
+    task.spawn(function()
+        while true do
+            CheckHP()
+            task.wait(CHECK_DELAY)
+        end
+    end)
+end)
