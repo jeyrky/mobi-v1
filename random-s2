@@ -1,0 +1,22 @@
+repeat wait() until game:IsLoaded() and game.Players.LocalPlayer 
+
+-- 1. Chờ Game Load
+if not game:IsLoaded() then game.Loaded:Wait() end
+
+-- 2. Chờ Player (người chơi)
+local Players = game:GetService("Players")
+repeat task.wait() until Players.LocalPlayer
+local lp = Players.LocalPlayer
+
+-- 3. QUAN TRỌNG: Chờ Giao Diện (PlayerGui) thay vì Character
+repeat task.wait() until lp:FindFirstChild("PlayerGui")
+local pg = lp.PlayerGui
+repeat task.wait() until #pg:GetChildren() > 0
+
+-- 4. Chờ thêm 5s cho bảng hiện rõ ràng
+task.wait(0)
+
+-- 5. Giờ mới chạy script chính (để script tự click chọn phe)
+pcall(function()
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/jeyrky/test/refs/heads/main/v1"))()
+end)
