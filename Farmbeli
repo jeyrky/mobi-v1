@@ -13,6 +13,12 @@ local RunService = game:GetService("RunService")
 local VirtualUser = game:GetService("VirtualUser")
 local TeleportService = game:GetService("TeleportService")
 
+local PORT = 8000
+local BASES = {
+    "http://127.0.0.1:" .. tostring(PORT),
+    "http://10.0.2.2:" .. tostring(PORT)
+}
+
 local function readPkgName()
     local pkg = nil
     pcall(function()
@@ -37,6 +43,31 @@ local function getUsername()
         end
     end)
     return uname
+end
+
+local function writeAppStorage(fields)
+    pcall(function()
+        if not writefile then
+            return
+        end
+        local js = {}
+        if isfile and isfile("appStorage.json") then
+            local content = readfile("appStorage.json")
+            if content and #content > 0 then
+                local ok, decoded = pcall(HttpService.JSONDecode, HttpService, content)
+                if ok and type(decoded) == "table" then
+                    js = decoded
+                end
+            end
+        end
+        for k, v in pairs(fields) do
+            js[k] = v
+        end
+        writefile("appStorage.json", HttpService:JSONEncode(js))
+        pcall(function()
+            writefile("../appStorage.json", HttpService:JSONEncode(js))
+        end)
+    end)
 end
 
 --------------------------------------------------------------------------------
@@ -121,12 +152,14 @@ end
 -- SIGNAL SENDER
 --------------------------------------------------------------------------------
 function SendSignal(signalName, extraData)
-    local url = "http://127.0.0.1:8000/signal"
     local pkgName = readPkgName() or "unknown"
+    local uname = getUsername()
+    local nonce = tostring(math.random(100000, 999999))
     local data = {
         package = pkgName,
-        username = getUsername(),
-        signal = signalName
+        username = uname,
+        signal = signalName,
+        nonce = nonce
     }
     if extraData then
         for k, v in pairs(extraData) do
@@ -134,53 +167,80 @@ function SendSignal(signalName, extraData)
         end
     end
     
-    local success, err = pcall(function()
-        if request then
-            request({
-                Url = url,
-                Method = "POST",
-                Headers = {["Content-Type"] = "application/json"},
-                Body = HttpService:JSONEncode(data)
-            })
-        elseif http_request then
-            http_request({
-                Url = url,
-                Method = "POST",
-                Headers = {["Content-Type"] = "application/json"},
-                Body = HttpService:JSONEncode(data)
-            })
+    local body = HttpService:JSONEncode(data)
+    local req = (syn and syn.request) or (http and http.request) or http_request or request
+
+    for _, base in ipairs(BASES) do
+        local url = base .. "/signal"
+        if req then
+            pcall(function()
+                req({
+                    Url = url,
+                    Method = "POST",
+                    Headers = {["Content-Type"] = "application/json"},
+                    Body = body
+                })
+            end)
         end
-    end)
+        pcall(function()
+            HttpService:RequestAsync({
+                Url = url,
+                Method = "POST",
+                Headers = {["Content-Type"] = "application/json"},
+                Body = body
+            })
+        end)
+    end
+
+    writeAppStorage({
+        PkgName = pkgName,
+        username = uname,
+        Signal = signalName,
+        Nonce = nonce,
+        Heartbeat = os.time()
+    })
 end
 
 local function SendHeartbeat(extraData)
     local pkgName = readPkgName()
     local uname = getUsername()
     local stype = "FARM"
-    local url = "http://127.0.0.1:8000/heartbeat"
-    if pkgName and pkgName ~= "" then
-        url = url .. "?package=" .. tostring(pkgName) .. "&username=" .. tostring(uname) .. "&server_type=" .. tostring(stype)
-    else
-        url = url .. "?username=" .. tostring(uname) .. "&server_type=" .. tostring(stype)
-    end
+    local beli = nil
     if extraData and extraData.beli ~= nil then
-        url = url .. "&beli=" .. tostring(extraData.beli)
+        beli = extraData.beli
     end
 
     local req = (syn and syn.request) or (http and http.request) or http_request or request
-    if req then
+
+    for _, base in ipairs(BASES) do
+        local url = base .. "/heartbeat"
+        if pkgName and pkgName ~= "" then
+            url = url .. "?package=" .. tostring(pkgName) .. "&username=" .. tostring(uname) .. "&server_type=" .. tostring(stype)
+        else
+            url = url .. "?username=" .. tostring(uname) .. "&server_type=" .. tostring(stype)
+        end
+        if beli ~= nil then
+            url = url .. "&beli=" .. tostring(beli)
+        end
+        if req then
+            pcall(function()
+                req({Url = url, Method = "GET"})
+            end)
+        end
         pcall(function()
-            req({Url = url, Method = "GET"})
+            HttpService:RequestAsync({
+                Url = url,
+                Method = "GET",
+                Headers = {["Content-Type"] = "application/json"}
+            })
         end)
     end
 
-    pcall(function()
-        HttpService:RequestAsync({
-            Url = url,
-            Method = "GET",
-            Headers = {["Content-Type"] = "application/json"}
-        })
-    end)
+    writeAppStorage({
+        PkgName = pkgName or "unknown",
+        username = uname,
+        Heartbeat = os.time()
+    })
 end
 
 function GetCurrentBeli()
