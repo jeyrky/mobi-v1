@@ -13,9 +13,6 @@ local RunService = game:GetService("RunService")
 local VirtualUser = game:GetService("VirtualUser")
 local TeleportService = game:GetService("TeleportService")
 
-local TARGET_BELI = _G.TargetBeli or 1000000 
-print("[FARM BELI] Target: " .. TARGET_BELI)
-
 local function readPkgName()
     local pkg = nil
     pcall(function()
@@ -166,6 +163,9 @@ local function SendHeartbeat(extraData)
     else
         url = url .. "?username=" .. tostring(uname) .. "&server_type=" .. tostring(stype)
     end
+    if extraData and extraData.beli ~= nil then
+        url = url .. "&beli=" .. tostring(extraData.beli)
+    end
 
     local req = (syn and syn.request) or (http and http.request) or http_request or request
     if req then
@@ -301,20 +301,16 @@ task.spawn(function()
                 lastChange = os.clock()
             else
                 if os.clock() - lastChange >= 30 then
-                    if cur < TARGET_BELI then
-                        hopping = true
-                        print("[FARM BELI] 30s không tăng Beli -> Hop server ít người...")
-                        pcall(function()
-                            SendSignal("HopLowUser", {beli = cur})
-                        end)
-                        task.wait(0.5)
-                        smartHopLowUser()
-                        task.wait(5)
-                        lastChange = os.clock()
-                        hopping = false
-                    else
-                        lastChange = os.clock()
-                    end
+                    hopping = true
+                    print("[FARM BELI] 30s không tăng Beli -> Hop server ít người...")
+                    pcall(function()
+                        SendSignal("HopLowUser", {beli = cur})
+                    end)
+                    task.wait(0.5)
+                    smartHopLowUser()
+                    task.wait(5)
+                    lastChange = os.clock()
+                    hopping = false
                 end
             end
         end
@@ -332,17 +328,10 @@ spawn(function()
         else
             -- Check Beli
             local current = GetCurrentBeli()
-            print("[FARM BELI] Hiện tại: " .. current .. " / Target: " .. TARGET_BELI)
+            print("[FARM BELI] Hiện tại: " .. current)
             
             -- Gửi heartbeat để Python biết đang farm (Status: FARMING)
             SendHeartbeat({beli = current})
-    
-            if current >= TARGET_BELI then
-                print("[FARM BELI] ĐÃ ĐỦ TIỀN! Gửi tín hiệu đổi nick...")
-                SendSignal("EnoughBeliFarmDone", {beli = current})
-                task.wait(10)
-                break
-            end
         end
     end
 end)
