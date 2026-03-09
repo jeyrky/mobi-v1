@@ -1,0 +1,180 @@
+-- [JK93S] Auto Farm Beli & Signal to Python
+-- Updated: Auto Choose Team & Auto Rejoin/Kick Detection
+-- Script gốc: https://raw.githubusercontent.com/trongdeptraihucscript/Main/refs/heads/main/TN-Tp-Chest.lua
+
+if not game:IsLoaded() then game.Loaded:Wait() end
+
+-- 1. Cấu hình & Helper gửi tín hiệu
+local HttpService = game:GetService("HttpService")
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local VirtualUser = game:GetService("VirtualUser")
+
+local TARGET_BELI = _G.TargetBeli or 500000 -- Mặc định 500k nếu không có config
+print("[FARM BELI] Target: " .. TARGET_BELI)
+
+--------------------------------------------------------------------------------
+-- AUTO CHOOSE TEAM (PIRATES)
+--------------------------------------------------------------------------------
+local function autoChooseTeam()
+    local teamName = "Pirates"
+    local commF = ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("CommF_")
+    if commF and commF:IsA("RemoteFunction") then
+        pcall(function() commF:InvokeServer("SetTeam", teamName) end)
+    end
+    task.wait(1)
+    if LocalPlayer.Team == nil then
+        local function click(btn)
+            if not btn then return end
+            local vim = game:GetService("VirtualInputManager")
+            local pos = btn.AbsolutePosition + (btn.AbsoluteSize/2)
+            vim:SendMouseButtonEvent(pos.X, pos.Y, 0, true, btn, 0)
+            vim:SendMouseButtonEvent(pos.X, pos.Y, 0, false, btn, 0)
+        end
+        
+        -- Click UI Button
+        for _, v in ipairs(game:GetService("CoreGui"):GetDescendants()) do
+            if (v:IsA("TextButton") or v:IsA("ImageButton")) and (v.Name:lower():find("pirate") or (v.Text and v.Text:lower():find("pirate"))) then
+                click(v) break
+            end
+        end
+        for _, v in ipairs(LocalPlayer.PlayerGui:GetDescendants()) do
+             if (v:IsA("TextButton") or v:IsA("ImageButton")) and (v.Name:lower():find("pirate") or (v.Text and v.Text:lower():find("pirate"))) then
+                click(v) break
+            end
+        end
+    end
+end
+
+-- Chạy chọn phe liên tục đến khi vào được team
+task.spawn(function()
+    local t0 = os.clock()
+    while LocalPlayer.Team == nil and os.clock() - t0 < 30 do
+        autoChooseTeam()
+        task.wait(1)
+    end
+end)
+
+--------------------------------------------------------------------------------
+-- ANTI AFK & KICK DETECTION
+--------------------------------------------------------------------------------
+LocalPlayer.Idled:Connect(function()
+    pcall(function()
+        VirtualUser:Button2Down(Vector2.new(0,0), workspace.CurrentCamera and workspace.CurrentCamera.CFrame or CFrame.new())
+        task.wait(1)
+        VirtualUser:Button2Up(Vector2.new(0,0), workspace.CurrentCamera and workspace.CurrentCamera.CFrame or CFrame.new())
+    end)
+end)
+
+local function isKicked()
+    local ok, res = pcall(function()
+        if not game.Players.LocalPlayer or not game.Players.LocalPlayer.Parent then
+            return true
+        end
+        local coreGui = game:GetService("CoreGui")
+        local promptGui = coreGui:FindFirstChild("RobloxPromptGui")
+        if not promptGui then return false end
+        local kws = {"kick","disconnect","security","banned","mất kết nối","mã lỗi","error code","please rejoin","not authorized","maintenance","bảo trì","internet","connection","same account","launch","idle","chặn","restricted","đóng","close","rời khỏi","leave","kết nối lại","reconnect","277","267","268"}
+        for _, d in ipairs(promptGui:GetDescendants()) do
+            if (d:IsA("TextLabel") or d:IsA("TextButton")) and d.Visible then
+                local t = string.lower(d.Text or "")
+                for _, k in ipairs(kws) do
+                    if string.find(t, k) then
+                        return true
+                    end
+                end
+            end
+        end
+        return false
+    end)
+    if ok then return res end
+    return false
+end
+
+--------------------------------------------------------------------------------
+-- SIGNAL SENDER
+--------------------------------------------------------------------------------
+function SendSignal(signalName, extraData)
+    local url = "http://127.0.0.1:8000/signal"
+    local data = {
+        package = "unknown",
+        username = LocalPlayer.Name,
+        signal = signalName
+    }
+    if extraData then
+        for k, v in pairs(extraData) do
+            data[k] = v
+        end
+    end
+    
+    local success, err = pcall(function()
+        if request then
+            request({
+                Url = url,
+                Method = "POST",
+                Headers = {["Content-Type"] = "application/json"},
+                Body = HttpService:JSONEncode(data)
+            })
+        elseif http_request then
+            http_request({
+                Url = url,
+                Method = "POST",
+                Headers = {["Content-Type"] = "application/json"},
+                Body = HttpService:JSONEncode(data)
+            })
+        end
+    end)
+end
+
+function GetCurrentBeli()
+    if LocalPlayer:FindFirstChild("Data") and LocalPlayer.Data:FindFirstChild("Beli") then
+        return LocalPlayer.Data.Beli.Value
+    end
+    if LocalPlayer:FindFirstChild("leaderstats") and LocalPlayer.leaderstats:FindFirstChild("Beli") then
+         return LocalPlayer.leaderstats.Beli.Value
+    end
+    return 0
+end
+
+--------------------------------------------------------------------------------
+-- MAIN LOGIC
+--------------------------------------------------------------------------------
+
+-- 1. Chạy Script Farm Gốc (Loadstring)
+spawn(function()
+    print("[FARM BELI] Đang tải script farm gốc...")
+    local success, err = pcall(function()
+        loadstring(game:HttpGet("https://raw.githubusercontent.com/trongdeptraihucscript/Main/refs/heads/main/TN-Tp-Chest.lua"))()
+    end)
+    if not success then
+        print("[ERROR] Lỗi tải script farm: " .. tostring(err))
+    end
+end)
+
+-- 2. Vòng lặp kiểm tra tiền & Kick Status
+spawn(function()
+    while task.wait(5) do
+        -- Check Kick
+        if isKicked() then
+            print("DETECTED KICKED! Sending Signal...")
+            SendSignal("HeartbeatKicked")
+            task.wait(5) -- Đợi Python xử lý
+        else
+            -- Check Beli
+            local current = GetCurrentBeli()
+            print("[FARM BELI] Hiện tại: " .. current .. " / Target: " .. TARGET_BELI)
+            
+            -- Gửi heartbeat để Python biết đang farm (Status: FARMING)
+            SendSignal("Heartbeat", {beli = current})
+    
+            if current >= TARGET_BELI then
+                print("[FARM BELI] ĐÃ ĐỦ TIỀN! Gửi tín hiệu đổi nick...")
+                SendSignal("EnoughBeliFarmDone", {beli = current})
+                task.wait(10)
+                break
+            end
+        end
+    end
+end)
