@@ -11,6 +11,7 @@ local LocalPlayer = Players.LocalPlayer
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local VirtualUser = game:GetService("VirtualUser")
+local TeleportService = game:GetService("TeleportService")
 
 local TARGET_BELI = _G.TargetBeli or 500000 -- Mặc định 500k nếu không có config
 print("[FARM BELI] Target: " .. TARGET_BELI)
@@ -142,6 +143,71 @@ end
 -- MAIN LOGIC
 --------------------------------------------------------------------------------
 
+local VISITED_FILE = "beli_visited.json"
+local function loadVisited()
+    local list = {}
+    local s, content = pcall(readfile, VISITED_FILE)
+    if s and content then
+        local s2, decoded = pcall(HttpService.JSONDecode, HttpService, content)
+        if s2 and decoded then list = decoded end
+    end
+    return list
+end
+
+local function saveVisited(jobId)
+    local list = loadVisited()
+    for _, id in ipairs(list) do
+        if id == jobId then return end
+    end
+    table.insert(list, jobId)
+    pcall(writefile, VISITED_FILE, HttpService:JSONEncode(list))
+end
+
+pcall(function()
+    saveVisited(game.JobId)
+end)
+
+local function smartHopLowUser()
+    local visited = loadVisited()
+    local visitedSet = {}
+    for _, id in ipairs(visited) do visitedSet[id] = true end
+
+    local req = (syn and syn.request) or http_request or request
+    local cursor = ""
+    local found = nil
+
+    if req then
+        for i = 1, 10 do
+            local url = "https://games.roblox.com/v1/games/" .. tostring(game.PlaceId) .. "/servers/Public?sortOrder=Asc&limit=100&cursor=" .. cursor
+            local ok, res = pcall(function() return req({Url = url, Method = "GET"}) end)
+            if ok and res and res.Body then
+                local data = HttpService:JSONDecode(res.Body)
+                if data and data.data then
+                    for _, server in ipairs(data.data) do
+                        local playing = server.playing or 0
+                        if server.id and server.id ~= game.JobId and playing < 12 and not visitedSet[server.id] then
+                            found = server.id
+                            break
+                        end
+                    end
+                end
+                if found then break end
+                if data and data.nextPageCursor then cursor = data.nextPageCursor else break end
+            end
+            task.wait(0.1)
+        end
+    end
+
+    if found then
+        pcall(function()
+            saveVisited(found)
+        end)
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, found, LocalPlayer)
+    else
+        TeleportService:Teleport(game.PlaceId, LocalPlayer)
+    end
+end
+
 -- 1. Chạy Script Farm Gốc (Loadstring)
 spawn(function()
     print("[FARM BELI] Đang tải script farm gốc...")
@@ -150,6 +216,54 @@ spawn(function()
     end)
     if not success then
         print("[ERROR] Lỗi tải script farm: " .. tostring(err))
+    end
+end)
+
+-- 1.1 Nếu 30s không tăng Beli thì hop server ít người
+task.spawn(function()
+    local lastBeli = 0
+    local lastChange = os.clock()
+    local hopping = false
+    pcall(function()
+        lastBeli = GetCurrentBeli()
+    end)
+
+    while task.wait(1) do
+        if hopping then
+            task.wait(10)
+        end
+
+        if isKicked() then
+            continue
+        end
+
+        local cur = 0
+        local ok = pcall(function()
+            cur = GetCurrentBeli()
+        end)
+        if ok then
+            if cur ~= lastBeli then
+                lastBeli = cur
+                lastChange = os.clock()
+            else
+                if os.clock() - lastChange >= 30 then
+                    if cur < TARGET_BELI then
+                        hopping = true
+                        print("[FARM BELI] 30s không tăng Beli -> Hop server ít người...")
+                        pcall(function()
+                            SendSignal("HopLowUser", {beli = cur})
+                        end)
+                        task.wait(0.5)
+                        smartHopLowUser()
+                        task.wait(5)
+                        lastChange = os.clock()
+                        hopping = false
+                    else
+                        lastChange = os.clock()
+                    end
+                end
+            end
+        end
     end
 end)
 
