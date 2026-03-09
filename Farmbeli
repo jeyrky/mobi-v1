@@ -13,8 +13,34 @@ local RunService = game:GetService("RunService")
 local VirtualUser = game:GetService("VirtualUser")
 local TeleportService = game:GetService("TeleportService")
 
-local TARGET_BELI = _G.TargetBeli or 500000 -- Mặc định 500k nếu không có config
+local TARGET_BELI = _G.TargetBeli or 1000000 
 print("[FARM BELI] Target: " .. TARGET_BELI)
+
+local function readPkgName()
+    local pkg = nil
+    pcall(function()
+        if isfile and isfile("appStorage.json") then
+            local content = readfile("appStorage.json")
+            if content and #content > 0 then
+                local js = HttpService:JSONDecode(content)
+                if js and js.PkgName then
+                    pkg = js.PkgName
+                end
+            end
+        end
+    end)
+    return pkg
+end
+
+local function getUsername()
+    local uname = "Unknown"
+    pcall(function()
+        if Players.LocalPlayer then
+            uname = Players.LocalPlayer.Name
+        end
+    end)
+    return uname
+end
 
 --------------------------------------------------------------------------------
 -- AUTO CHOOSE TEAM (PIRATES)
@@ -99,9 +125,10 @@ end
 --------------------------------------------------------------------------------
 function SendSignal(signalName, extraData)
     local url = "http://127.0.0.1:8000/signal"
+    local pkgName = readPkgName() or "unknown"
     local data = {
-        package = "unknown",
-        username = LocalPlayer.Name,
+        package = pkgName,
+        username = getUsername(),
         signal = signalName
     }
     if extraData then
@@ -126,6 +153,33 @@ function SendSignal(signalName, extraData)
                 Body = HttpService:JSONEncode(data)
             })
         end
+    end)
+end
+
+local function SendHeartbeat(extraData)
+    local pkgName = readPkgName()
+    local uname = getUsername()
+    local stype = "FARM"
+    local url = "http://127.0.0.1:8000/heartbeat"
+    if pkgName and pkgName ~= "" then
+        url = url .. "?package=" .. tostring(pkgName) .. "&username=" .. tostring(uname) .. "&server_type=" .. tostring(stype)
+    else
+        url = url .. "?username=" .. tostring(uname) .. "&server_type=" .. tostring(stype)
+    end
+
+    local req = (syn and syn.request) or (http and http.request) or http_request or request
+    if req then
+        pcall(function()
+            req({Url = url, Method = "GET"})
+        end)
+    end
+
+    pcall(function()
+        HttpService:RequestAsync({
+            Url = url,
+            Method = "GET",
+            Headers = {["Content-Type"] = "application/json"}
+        })
     end)
 end
 
@@ -273,7 +327,7 @@ spawn(function()
         -- Check Kick
         if isKicked() then
             print("DETECTED KICKED! Sending Signal...")
-            SendSignal("HeartbeatKicked")
+            SendSignal("Kicked")
             task.wait(5) -- Đợi Python xử lý
         else
             -- Check Beli
@@ -281,7 +335,7 @@ spawn(function()
             print("[FARM BELI] Hiện tại: " .. current .. " / Target: " .. TARGET_BELI)
             
             -- Gửi heartbeat để Python biết đang farm (Status: FARMING)
-            SendSignal("Heartbeat", {beli = current})
+            SendHeartbeat({beli = current})
     
             if current >= TARGET_BELI then
                 print("[FARM BELI] ĐÃ ĐỦ TIỀN! Gửi tín hiệu đổi nick...")
