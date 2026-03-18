@@ -221,36 +221,53 @@ end
 local function smartHopLowUser()
     if HOPPING then return end
     HOPPING = true
-    print("[FARM BELI] Đang tìm server ít người (< 5 người)...")
+    print("[FARM BELI] Đang tìm server mới (< 5 người)...")
     
     local function scan()
-        local req = (syn and syn.request) or http_request or request
-        if not req then return nil end
-        local url = "https://games.roblox.com/v1/games/" .. tostring(game.PlaceId) .. "/servers/Public?sortOrder=Asc&limit=100"
+        local req = (syn and syn.request) or (http and http.request) or http_request or request
+        if not req then 
+            print("[WARN] Executor không hỗ trợ HTTP Request, chuyển sang Hop mặc định...")
+            return nil 
+        end
+        
+        -- Thêm cache buster để lấy dữ liệu server mới nhất
+        local url = "https://games.roblox.com/v1/games/" .. tostring(game.PlaceId) .. "/servers/Public?sortOrder=Asc&limit=100&_t=" .. tostring(os.time())
         local ok, res = pcall(function() return req({Url = url, Method = "GET"}) end)
+        
         if ok and res and res.Body then
             local data = HttpService:JSONDecode(res.Body)
             if data and data.data then
                 local candidates = {}
                 for _, s in ipairs(data.data) do
+                    -- Chỉ lấy server khác JobId hiện tại và có dưới 5 người
                     if s.id and s.id ~= game.JobId and (s.playing or 0) < 5 then
                         table.insert(candidates, s.id)
                     end
                 end
-                if #candidates > 0 then return candidates[math.random(1, #candidates)] end
+                if #candidates > 0 then 
+                    return candidates[math.random(1, #candidates)] 
+                end
             end
         end
         return nil
     end
 
     local serverId = scan()
-    if serverId then
-        TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId, LocalPlayer)
-    else
-        TeleportService:Teleport(game.PlaceId, LocalPlayer)
-    end
-    task.wait(10)
-    HOPPING = false
+    pcall(function()
+        if serverId then
+            print("[FARM BELI] Chuyển đến server: " .. tostring(serverId))
+            TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId, LocalPlayer)
+        else
+            -- Nếu không tìm được server < 5 người, hop đại sang server khác
+            print("[FARM BELI] Không tìm thấy server < 5 người, hop ngẫu nhiên...")
+            TeleportService:Teleport(game.PlaceId, LocalPlayer)
+        end
+    end)
+    
+    -- Sau 10s nếu vẫn chưa teleport được thì cho phép gọi lệnh hop tiếp theo
+    task.delay(10, function()
+        HOPPING = false
+    end)
 end
 
 --------------------------------------------------------------------------------
@@ -274,7 +291,7 @@ LocalPlayer.Idled:Connect(function()
     end)
 end)
 
--- 3. Beli Monitoring (20s No Increase -> Hop < 5 Players)
+-- 3. Beli Monitoring (10s No Increase -> Hop < 5 Players)
 local function comma_value(n)
     local left, num, right = string.match(n, '^([^%d]*%d)(%d*)(.-)$')
     return left .. (num:reverse():gsub('(%d%d%d)', '%1,'):reverse()) .. right
@@ -294,7 +311,7 @@ end
 task.spawn(function()
     print("[FARM BELI] Grace period 60s bắt đầu (Không tính tiền thời gian này)...")
     task.wait(60) -- Grace period 60s đầu tiên
-    print("[FARM BELI] Hết 60s grace period. Bắt đầu theo dõi Beli (20s check)...")
+    print("[FARM BELI] Hết 60s grace period. Bắt đầu theo dõi Beli (10s check)...")
     
     LAST_BELI_VALUE = GetCurrentBeli()
     LAST_BELI_CHANGE = os.clock()
@@ -306,21 +323,31 @@ task.spawn(function()
         -- Cập nhật số giây không tăng tiền lên UI (nếu có)
         pcall(function()
             local ui = game:GetService("CoreGui"):FindFirstChild("JK93S_BeliUI") or LocalPlayer.PlayerGui:FindFirstChild("JK93S_BeliUI")
-            if ui and ui:FindFirstChild("MainFrame") and ui.MainFrame:FindFirstChild("IdleLabel") then
-                if idleTime > 0 then
-                    ui.MainFrame.IdleLabel.Text = "Idle: " .. math.floor(idleTime) .. "s / 20s"
-                else
-                    ui.MainFrame.IdleLabel.Text = "Status: Farming..."
+            if ui and ui:FindFirstChild("MainFrame") then
+                local main = ui.MainFrame
+                if main:FindFirstChild("IdleLabel") then
+                    if idleTime > 0 then
+                        main.IdleLabel.Text = "Idle: " .. math.floor(idleTime) .. "s / 10s"
+                    else
+                        main.IdleLabel.Text = "Status: Farming..."
+                    end
+                end
+                if main:FindFirstChild("HopStatus") then
+                    if HOPPING then
+                        main.HopStatus.Text = "Attempting Server Hop..."
+                    else
+                        main.HopStatus.Text = ""
+                    end
                 end
             end
         end)
 
-        -- [BẮT BUỘC] Nếu đã đủ 10 giây -> HOP NGAY (Dù cur có lớn hơn LAST_BELI_VALUE hay không)
+        -- [BẮT BUỘC] Nếu đã đủ 10 giây -> HOP NGAY
         if idleTime >= 10 then
             print("[FARM BELI] Chốt mốc 10s không tăng Beli. Thực hiện Hop Server ngay lập tức!")
             SendSignal("HopLowUser", {beli = cur, reason = "10s_no_beli_increase_locked"})
             smartHopLowUser()
-            -- Reset mốc thời gian sau khi gọi Hop để tránh spam lệnh trong khi đang đợi teleport
+            -- Reset mốc thời gian để tránh spam lệnh trong khi đang đợi teleport
             LAST_BELI_CHANGE = os.clock()
         end
 
@@ -445,8 +472,19 @@ local function startCleanUI()
         idleLabel.TextColor3 = Color3.new(1, 0.5, 0.5) -- Màu đỏ nhạt cho cảnh báo Idle
         idleLabel.TextSize = 16
         idleLabel.Font = Enum.Font.GothamBold
-        idleLabel.Text = "Status: Initializing..."
+        idleLabel.Text = "Status: Wait (60s)..."
         idleLabel.Parent = mainFrame
+
+        local hopStatus = Instance.new("TextLabel")
+        hopStatus.Name = "HopStatus"
+        hopStatus.Size = UDim2.new(1, 0, 0.15, 0)
+        hopStatus.Position = UDim2.new(0, 0, 0.85, 5)
+        hopStatus.BackgroundTransparency = 1
+        hopStatus.TextColor3 = Color3.new(0.5, 0.5, 1) -- Màu xanh dương nhạt cho trạng thái Hop
+        hopStatus.TextSize = 12
+        hopStatus.Font = Enum.Font.Gotham
+        hopStatus.Text = ""
+        hopStatus.Parent = mainFrame
 
         -- 4. Tắt 3D Rendering để siêu mượt (Tùy chọn: nếu anh muốn màn hình đen xì cho đỡ tốn pin)
         -- game:GetService("RunService"):Set3dRenderingEnabled(false)
