@@ -274,7 +274,44 @@ local function saveVisited(jobId)
         if id == jobId then return end
     end
     table.insert(list, jobId)
+    local limit = 300
+    while #list > limit do
+        table.remove(list, 1)
+    end
     pcall(writefile, VISITED_FILE, HttpService:JSONEncode(list))
+end
+
+local TELEPORT_FAIL_TS = 0
+local TELEPORT_FAIL_RESULT = nil
+local TELEPORT_FAIL_MSG = nil
+local TELEPORT_HOOKED = false
+local HOP_TOKEN = 0
+
+local function ensureTeleportHooks()
+    if TELEPORT_HOOKED then
+        return
+    end
+    TELEPORT_HOOKED = true
+    pcall(function()
+        TeleportService.TeleportInitFailed:Connect(function(player, result, message)
+            if player == LocalPlayer then
+                TELEPORT_FAIL_TS = os.clock()
+                TELEPORT_FAIL_RESULT = result
+                TELEPORT_FAIL_MSG = message
+            end
+        end)
+    end)
+    pcall(function()
+        if TeleportService.TeleportFailed then
+            TeleportService.TeleportFailed:Connect(function(player, result, message)
+                if player == LocalPlayer then
+                    TELEPORT_FAIL_TS = os.clock()
+                    TELEPORT_FAIL_RESULT = result
+                    TELEPORT_FAIL_MSG = message
+                end
+            end)
+        end
+    end)
 end
 
 pcall(function()
@@ -282,44 +319,134 @@ pcall(function()
 end)
 
 local function smartHopLowUser()
+    HOP_TOKEN = HOP_TOKEN + 1
+    local hopToken = HOP_TOKEN
+    local startJobId = game.JobId
+
     local visited = loadVisited()
     local visitedSet = {}
     for _, id in ipairs(visited) do visitedSet[id] = true end
 
-    local req = (syn and syn.request) or http_request or request
-    local cursor = ""
-    local found = nil
+    ensureTeleportHooks()
 
-    if req then
-        for i = 1, 10 do
-            local url = "https://games.roblox.com/v1/games/" .. tostring(game.PlaceId) .. "/servers/Public?sortOrder=Asc&limit=100&cursor=" .. cursor
+    local minFreeSlots = 3
+    local maxScanPages = 10
+    local maxCandidates = 35
+    local maxTeleportTries = 8
+    local teleportWait = 12
+    local failWindow = 4
+
+    local function isGameFull(result, message)
+        local r = tostring(result or "")
+        local m = tostring(message or "")
+        r = string.lower(r)
+        m = string.lower(m)
+        if string.find(r, "gamefull") then return true end
+        if string.find(m, "full") then return true end
+        if string.find(m, "maximum") and string.find(m, "players") then return true end
+        return false
+    end
+
+    local function tryTeleportTo(serverId)
+        local startTs = TELEPORT_FAIL_TS
+        local ok = pcall(function()
+            TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId, LocalPlayer)
+        end)
+        if not ok then
+            return false, "pcall_failed", nil
+        end
+        local t0 = os.clock()
+        while os.clock() - t0 < failWindow do
+            if TELEPORT_FAIL_TS ~= startTs then
+                return false, TELEPORT_FAIL_RESULT, TELEPORT_FAIL_MSG
+            end
+            task.wait(0.2)
+        end
+        task.spawn(function()
+            task.wait(teleportWait)
+            if HOP_TOKEN == hopToken and game.JobId == startJobId then
+                smartHopLowUser()
+            end
+        end)
+        return true, nil, nil
+    end
+
+    local req = (syn and syn.request) or http_request or request
+    local candidates = {}
+
+    local function scanServers(minSlots)
+        local out = {}
+        local cur = ""
+        for i = 1, maxScanPages do
+            local url = "https://games.roblox.com/v1/games/" .. tostring(game.PlaceId) .. "/servers/Public?sortOrder=Asc&limit=100&cursor=" .. cur
             local ok, res = pcall(function() return req({Url = url, Method = "GET"}) end)
             if ok and res and res.Body then
                 local data = HttpService:JSONDecode(res.Body)
                 if data and data.data then
                     for _, server in ipairs(data.data) do
                         local playing = server.playing or 0
-                        if server.id and server.id ~= game.JobId and playing < 12 and not visitedSet[server.id] then
-                            found = server.id
-                            break
+                        local maxPlayers = server.maxPlayers or 12
+                        local free = (maxPlayers - playing)
+                        if server.id and server.id ~= game.JobId and free >= minSlots and not visitedSet[server.id] then
+                            table.insert(out, {id = server.id, playing = playing, free = free})
+                            if #out >= maxCandidates then
+                                break
+                            end
                         end
                     end
                 end
-                if found then break end
-                if data and data.nextPageCursor then cursor = data.nextPageCursor else break end
+                if #out >= maxCandidates then break end
+                if data and data.nextPageCursor then cur = data.nextPageCursor else break end
             end
             task.wait(0.1)
         end
+        return out
     end
 
-    if found then
-        pcall(function()
-            saveVisited(found)
-        end)
-        TeleportService:TeleportToPlaceInstance(game.PlaceId, found, LocalPlayer)
-    else
-        TeleportService:Teleport(game.PlaceId, LocalPlayer)
+    if req then
+        candidates = scanServers(minFreeSlots)
+        if #candidates == 0 then
+            candidates = scanServers(1)
+        end
     end
+
+    if #candidates > 0 then
+        table.sort(candidates, function(a, b)
+            return (a.playing or 0) < (b.playing or 0)
+        end)
+
+        local topN = math.min(#candidates, 12)
+        local picks = {}
+        for i = 1, topN do
+            table.insert(picks, candidates[i])
+        end
+        for i = #picks, 2, -1 do
+            local j = math.random(1, i)
+            picks[i], picks[j] = picks[j], picks[i]
+        end
+
+        local tries = 0
+        for _, s in ipairs(picks) do
+            tries = tries + 1
+            if tries > maxTeleportTries then break end
+            local ok, r, m = tryTeleportTo(s.id)
+            if ok then
+                pcall(function()
+                    saveVisited(s.id)
+                end)
+                return
+            else
+                if not isGameFull(r, m) then
+                    pcall(function()
+                        saveVisited(s.id)
+                    end)
+                end
+                task.wait(0.4)
+            end
+        end
+    end
+
+    TeleportService:Teleport(game.PlaceId, LocalPlayer)
 end
 
 -- 1. Chạy Script Farm Gốc (Loadstring)
