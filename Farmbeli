@@ -275,9 +275,28 @@ LocalPlayer.Idled:Connect(function()
 end)
 
 -- 3. Beli Monitoring (20s No Increase -> Hop < 5 Players)
+local function comma_value(n)
+    local left, num, right = string.match(n, '^([^%d]*%d)(%d*)(.-)$')
+    return left .. (num:reverse():gsub('(%d%d%d)', '%1,'):reverse()) .. right
+end
+
 function GetCurrentBeli()
-    local data = LocalPlayer:FindFirstChild("Data") or LocalPlayer:FindFirstChild("leaderstats")
-    if data and data:FindFirstChild("Beli") then return data.Beli.Value end
+    -- Ưu tiên tìm trong Data (Blox Fruits thường để ở đây)
+    local data = LocalPlayer:FindFirstChild("Data")
+    if data and data:FindFirstChild("Beli") then
+        return data.Beli.Value
+    end
+    -- Dự phòng trong leaderstats
+    local stats = LocalPlayer:FindFirstChild("leaderstats")
+    if stats and stats:FindFirstChild("Beli") then
+        return stats.Beli.Value
+    end
+    -- Dự phòng tìm bất cứ IntValue/NumberValue nào tên Beli trong Player
+    for _, v in ipairs(LocalPlayer:GetDescendants()) do
+        if v.Name == "Beli" and (v:IsA("IntValue") or v:IsA("NumberValue")) then
+            return v.Value
+        end
+    end
     return 0
 end
 
@@ -378,8 +397,8 @@ local function startCleanUI()
         screenGui.Parent = uiParent
 
         local mainFrame = Instance.new("Frame")
-        mainFrame.Size = UDim2.new(0, 250, 0, 80)
-        mainFrame.Position = UDim2.new(0.5, -125, 0, 50)
+        mainFrame.Size = UDim2.new(0, 300, 0, 100)
+        mainFrame.Position = UDim2.new(0.5, -150, 0, 50)
         mainFrame.BackgroundColor3 = Color3.new(0, 0, 0)
         mainFrame.BackgroundTransparency = 0.5
         mainFrame.BorderSizePixel = 0
@@ -389,19 +408,29 @@ local function startCleanUI()
         corner.CornerRadius = UDim.new(0, 10)
         corner.Parent = mainFrame
 
+        local userLabel = Instance.new("TextLabel")
+        userLabel.Size = UDim2.new(1, 0, 0.3, 0)
+        userLabel.Position = UDim2.new(0, 0, 0, 5)
+        userLabel.BackgroundTransparency = 1
+        userLabel.TextColor3 = Color3.new(1, 1, 1) -- Màu trắng cho tên
+        userLabel.TextSize = 16
+        userLabel.Font = Enum.Font.Gotham
+        userLabel.Text = "User: " .. getUsername()
+        userLabel.Parent = mainFrame
+
         local beliLabel = Instance.new("TextLabel")
-        beliLabel.Size = UDim2.new(1, 0, 0.6, 0)
-        beliLabel.Position = UDim2.new(0, 0, 0, 5)
+        beliLabel.Size = UDim2.new(1, 0, 0.4, 0)
+        beliLabel.Position = UDim2.new(0, 0, 0.3, 0)
         beliLabel.BackgroundTransparency = 1
         beliLabel.TextColor3 = Color3.new(1, 1, 0) -- Màu vàng cho Beli
-        beliLabel.TextSize = 24
+        beliLabel.TextSize = 26
         beliLabel.Font = Enum.Font.GothamBold
         beliLabel.Text = "Beli: 0"
         beliLabel.Parent = mainFrame
 
         local addLabel = Instance.new("TextLabel")
-        addLabel.Size = UDim2.new(1, 0, 0.4, 0)
-        addLabel.Position = UDim2.new(0, 0, 0.6, 0)
+        addLabel.Size = UDim2.new(1, 0, 0.3, 0)
+        addLabel.Position = UDim2.new(0, 0, 0.7, 0)
         addLabel.BackgroundTransparency = 1
         addLabel.TextColor3 = Color3.new(0, 1, 0) -- Màu xanh cho số cộng thêm
         addLabel.TextSize = 18
@@ -417,11 +446,12 @@ local function startCleanUI()
         task.spawn(function()
             while task.wait(0.5) do
                 local cur = GetCurrentBeli()
-                beliLabel.Text = "Beli: " .. string.format('%,.0f', cur)
+                -- Sử dụng hàm comma_value để hiển thị số tiền đẹp hơn
+                beliLabel.Text = "Beli: " .. comma_value(tostring(cur))
                 
                 if cur > lastVal then
                     local added = cur - lastVal
-                    addLabel.Text = "+ " .. string.format('%,.0f', added)
+                    addLabel.Text = "+ " .. comma_value(tostring(added))
                     lastVal = cur
                     -- Hiệu ứng biến mất số cộng thêm sau 3 giây
                     task.delay(3, function()
