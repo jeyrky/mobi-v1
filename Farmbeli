@@ -351,5 +351,92 @@ task.spawn(function()
     end
 end)
 
+-- 7. CLEAN UI MODE (Ẩn hết UI trừ số Beli)
+local function startCleanUI()
+    pcall(function()
+        -- 1. Ẩn CoreGui của Roblox (Chat, Leaderboard, Backpack, etc.)
+        game:GetService("StarterGui"):SetCoreGuiEnabled(Enum.CoreGuiType.All, false)
+        
+        -- 2. Ẩn toàn bộ ScreenGui trong PlayerGui của Game
+        local pg = LocalPlayer:WaitForChild("PlayerGui")
+        local function hideGui(v)
+            if v:IsA("ScreenGui") and v.Name ~= "JK93S_BeliUI" then
+                v.Enabled = false
+            end
+        end
+        for _, v in ipairs(pg:GetChildren()) do hideGui(v) end
+        pg.ChildAdded:Connect(hideGui)
+
+        -- 3. Tạo UI siêu gọn chỉ hiện Beli
+        local screenGui = Instance.new("ScreenGui")
+        screenGui.Name = "JK93S_BeliUI"
+        screenGui.ResetOnSpawn = false
+        screenGui.DisplayOrder = 999
+        
+        -- Thử chèn vào CoreGui để không bị game xóa, nếu không được thì vào PlayerGui
+        local uiParent = game:GetService("CoreGui"):FindFirstChild("RobloxGui") or pg
+        screenGui.Parent = uiParent
+
+        local mainFrame = Instance.new("Frame")
+        mainFrame.Size = UDim2.new(0, 250, 0, 80)
+        mainFrame.Position = UDim2.new(0.5, -125, 0, 50)
+        mainFrame.BackgroundColor3 = Color3.new(0, 0, 0)
+        mainFrame.BackgroundTransparency = 0.5
+        mainFrame.BorderSizePixel = 0
+        mainFrame.Parent = screenGui
+        
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 10)
+        corner.Parent = mainFrame
+
+        local beliLabel = Instance.new("TextLabel")
+        beliLabel.Size = UDim2.new(1, 0, 0.6, 0)
+        beliLabel.Position = UDim2.new(0, 0, 0, 5)
+        beliLabel.BackgroundTransparency = 1
+        beliLabel.TextColor3 = Color3.new(1, 1, 0) -- Màu vàng cho Beli
+        beliLabel.TextSize = 24
+        beliLabel.Font = Enum.Font.GothamBold
+        beliLabel.Text = "Beli: 0"
+        beliLabel.Parent = mainFrame
+
+        local addLabel = Instance.new("TextLabel")
+        addLabel.Size = UDim2.new(1, 0, 0.4, 0)
+        addLabel.Position = UDim2.new(0, 0, 0.6, 0)
+        addLabel.BackgroundTransparency = 1
+        addLabel.TextColor3 = Color3.new(0, 1, 0) -- Màu xanh cho số cộng thêm
+        addLabel.TextSize = 18
+        addLabel.Font = Enum.Font.Gotham
+        addLabel.Text = ""
+        addLabel.Parent = mainFrame
+
+        -- 4. Tắt 3D Rendering để siêu mượt (Tùy chọn: nếu anh muốn màn hình đen xì cho đỡ tốn pin)
+        -- game:GetService("RunService"):Set3dRenderingEnabled(false)
+
+        -- 5. Cập nhật số tiền liên tục
+        local lastVal = GetCurrentBeli()
+        task.spawn(function()
+            while task.wait(0.5) do
+                local cur = GetCurrentBeli()
+                beliLabel.Text = "Beli: " .. string.format('%,.0f', cur)
+                
+                if cur > lastVal then
+                    local added = cur - lastVal
+                    addLabel.Text = "+ " .. string.format('%,.0f', added)
+                    lastVal = cur
+                    -- Hiệu ứng biến mất số cộng thêm sau 3 giây
+                    task.delay(3, function()
+                        if lastVal == cur then addLabel.Text = "" end
+                    end)
+                elseif cur < lastVal then
+                    lastVal = cur -- Reset nếu tiền giảm (đổi acc)
+                end
+            end
+        end)
+    end)
+end
+
+-- Chạy Clean UI
+task.spawn(startCleanUI)
+
 -- Lựa chọn autook.py (Tín hiệu thông báo cho Python biết đã sẵn sàng)
 SendSignal("ScriptReady", {mode = "AutoOK"})
