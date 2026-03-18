@@ -744,8 +744,8 @@ end)
 
 -- 1.1 Nếu 90s không tăng Beli thì hop server ít người
 task.spawn(function()
-    -- Đợi 30s đầu tiên để game load hoàn toàn dữ liệu (Data/leaderstats)
-    task.wait(30)
+    -- [NEW] Đợi 60s đầu tiên để game load hoàn toàn dữ liệu và ổn định vị trí farm
+    task.wait(60)
     
     local lastBeli = 0
     local lastChange = os.clock()
@@ -753,6 +753,9 @@ task.spawn(function()
     pcall(function()
         lastBeli = GetCurrentBeli()
     end)
+    
+    -- Reset lại thời điểm bắt đầu tính toán sau khi hết 60s grace period
+    lastChange = os.clock()
 
     while task.wait(1) do
         if hopping then
