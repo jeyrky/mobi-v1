@@ -20,7 +20,6 @@ local BASES = {
     "http://10.0.2.2:" .. tostring(PORT)
 }
 
-local TARGET_BELI = tonumber(_G.TargetBeli) or 2000000
 local START_TIME = os.clock()
 local LAST_BELI_CHANGE = os.clock()
 local LAST_BELI_VALUE = 0
@@ -306,11 +305,7 @@ task.spawn(function()
         local cur = GetCurrentBeli()
         SendHeartbeat(cur)
         print("[STATUS] Heartbeat sent. Beli: " .. cur)
-        
-        if cur >= TARGET_BELI then
-            SendSignal("ChangeAccount", {beli = cur, target = TARGET_BELI})
-            task.wait(5)
-        end
+        -- Việc đổi nick hoàn toàn do Python tự quyết định dựa trên số Beli nhận được từ Heartbeat
     end
 end)
 
