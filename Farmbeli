@@ -241,9 +241,8 @@ local function isKicked()
         
         for _, k in ipairs(kws) do
             if string.find(t, k, 1, true) then
-                -- Kiểm tra thêm để tránh nhận diện nhầm nút "Teleport" hoặc "Failed" thông thường
-                -- Nếu là "Teleport" mà không có "Failed" đi kèm thì bỏ qua
-                if k == "teleport" and not string.find(t, "failed") then
+                -- Tránh nhận diện nhầm các từ khóa thông thường
+                if (k == "teleport" and not string.find(t, "failed")) or (k == "lỗi" and (string.find(t, "chọn") or string.find(t, "đổi"))) then
                     continue
                 end
                 return true, codeFound, string.sub(text or "", 1, 300)
@@ -743,8 +742,11 @@ spawn(function()
     end
 end)
 
--- 1.1 Nếu 30s không tăng Beli thì hop server ít người
+-- 1.1 Nếu 90s không tăng Beli thì hop server ít người
 task.spawn(function()
+    -- Đợi 30s đầu tiên để game load hoàn toàn dữ liệu (Data/leaderstats)
+    task.wait(30)
+    
     local lastBeli = 0
     local lastChange = os.clock()
     local hopping = false
@@ -770,15 +772,16 @@ task.spawn(function()
                 lastBeli = cur
                 lastChange = os.clock()
             else
-                if os.clock() - lastChange >= 30 then
+                -- Tăng lên 90s để phù hợp với tốc độ farm chest (tránh hop quá sớm)
+                if os.clock() - lastChange >= 90 then
                     hopping = true
-                    print("[FARM BELI] 30s không tăng Beli -> Hop server ít người...")
+                    print("[FARM BELI] 90s không tăng Beli -> Hop server ít người...")
                     pcall(function()
                         SendSignal("HopLowUser", {beli = cur})
                     end)
                     task.wait(0.5)
                     smartHopLowUser()
-                    task.wait(5)
+                    task.wait(15) -- Đợi teleport
                     lastChange = os.clock()
                     hopping = false
                 end
