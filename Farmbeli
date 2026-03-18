@@ -124,33 +124,65 @@ LocalPlayer.Idled:Connect(function()
 end)
 
 local function isKicked()
-    local ok, res = pcall(function()
-        if not game.Players.LocalPlayer or not game.Players.LocalPlayer.Parent then
-            return true
-        end
-        local coreGui = game:GetService("CoreGui")
-        local promptGui = coreGui:FindFirstChild("RobloxPromptGui")
-        if not promptGui then return false end
-        local kws = {"kick","disconnect","security","banned","mất kết nối","mã lỗi","error code","please rejoin","not authorized","maintenance","bảo trì","internet","connection","same account","launch","idle","chặn","restricted","đóng","close","rời khỏi","leave","kết nối lại","reconnect","277","267","268"}
-        for _, d in ipairs(promptGui:GetDescendants()) do
-            if (d:IsA("TextLabel") or d:IsA("TextButton")) and d.Visible then
-                local t = string.lower(d.Text or "")
-                for _, k in ipairs(kws) do
-                    if string.find(t, k) then
-                        return true
+    local function collectText(root)
+        if not root then return "", nil end
+        local out = {}
+        local code = nil
+        for _, d in ipairs(root:GetDescendants()) do
+            if d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox") then
+                local t = d.Text
+                if t and #t > 0 then
+                    table.insert(out, t)
+                    if not code then
+                        local c = string.match(t, "[Ee]rror%s*[Cc]ode%s*:?%s*(%d%d%d)")
+                        if c then
+                            code = c
+                        end
                     end
                 end
             end
         end
+        return table.concat(out, " | "), code
+    end
+
+    local ok, kicked, code, snippet = pcall(function()
+        if not game.Players.LocalPlayer or not game.Players.LocalPlayer.Parent then
+            return true, "offline", "player_nil"
+        end
+        local coreGui = game:GetService("CoreGui")
+        local promptGui = coreGui:FindFirstChild("RobloxPromptGui")
+        local text1, code1 = collectText(promptGui)
+        local pg = Players.LocalPlayer and Players.LocalPlayer:FindFirstChild("PlayerGui")
+        local text2, code2 = collectText(pg)
+
+        local text = (text1 or "") .. " " .. (text2 or "")
+        local codeFound = code1 or code2
+        local t = string.lower(text or "")
+        local kws = {"disconnected","disconnect","kicked","kick","security kick","banned","not authorized","maintenance","internet","connection","same account","please rejoin","error code","mất kết nối","mã lỗi","bảo trì","kết nối lại","reconnect","restricted","277","267","268"}
+        for _, k in ipairs(kws) do
+            if string.find(t, k, 1, true) then
+                return true, codeFound, string.sub(text or "", 1, 300)
+            end
+        end
         return false
     end)
-    if ok then return res end
+    if ok then return kicked == true, code, snippet end
     return false
 end
 
 --------------------------------------------------------------------------------
 -- SIGNAL SENDER
 --------------------------------------------------------------------------------
+local function urlEncode(str)
+    if str == nil then return "" end
+    str = tostring(str)
+    str = string.gsub(str, "\n", "\r\n")
+    str = string.gsub(str, "([^%w%-_%.~])", function(c)
+        return string.format("%%%02X", string.byte(c))
+    end)
+    return str
+end
+
 function SendSignal(signalName, extraData)
     local pkgName = readPkgName() or "unknown"
     local uname = getUsername()
@@ -190,6 +222,24 @@ function SendSignal(signalName, extraData)
                 Body = body
             })
         end)
+
+        local qs = "?signal=" .. urlEncode(signalName) .. "&username=" .. urlEncode(uname) .. "&nonce=" .. urlEncode(nonce)
+        if pkgName and pkgName ~= "" then
+            qs = qs .. "&package=" .. urlEncode(pkgName)
+        end
+        local getUrl = base .. "/signal" .. qs
+        if req then
+            pcall(function()
+                req({Url = getUrl, Method = "GET"})
+            end)
+        end
+        pcall(function()
+            HttpService:RequestAsync({
+                Url = getUrl,
+                Method = "GET",
+                Headers = {["Content-Type"] = "application/json"}
+            })
+        end)
     end
 
     writeAppStorage({
@@ -200,6 +250,44 @@ function SendSignal(signalName, extraData)
         Heartbeat = os.time()
     })
 end
+
+local LAST_KICK_SENT = 0
+local function notifyKick()
+    local kicked, code, snippet = isKicked()
+    if not kicked then
+        return false
+    end
+    local now = os.clock()
+    if now - LAST_KICK_SENT >= 8 then
+        LAST_KICK_SENT = now
+        pcall(function()
+            SendSignal("Kicked", {code = code or "", msg = snippet or ""})
+        end)
+    end
+    return true
+end
+
+task.spawn(function()
+    while task.wait(2) do
+        notifyKick()
+    end
+end)
+
+task.spawn(function()
+    local cg = game:GetService("CoreGui")
+    local pg = Players.LocalPlayer and Players.LocalPlayer:FindFirstChild("PlayerGui")
+    local function hook(container)
+        if not container then return end
+        pcall(function()
+            container.DescendantAdded:Connect(function()
+                task.wait(0.2)
+                notifyKick()
+            end)
+        end)
+    end
+    hook(cg)
+    hook(pg)
+end)
 
 local function SendHeartbeat(extraData)
     local pkgName = readPkgName()
@@ -474,7 +562,7 @@ task.spawn(function()
             task.wait(10)
         end
 
-        if isKicked() then
+        if notifyKick() then
             continue
         end
 
@@ -507,10 +595,7 @@ end)
 -- 2. Vòng lặp kiểm tra tiền & Kick Status
 spawn(function()
     while task.wait(5) do
-        -- Check Kick
-        if isKicked() then
-            print("DETECTED KICKED! Sending Signal...")
-            SendSignal("Kicked")
+        if notifyKick() then
             task.wait(5) -- Đợi Python xử lý
         else
             -- Check Beli
