@@ -274,7 +274,7 @@ LocalPlayer.Idled:Connect(function()
     end)
 end)
 
--- 3. Beli Monitoring (20s No Change -> Hop < 5 Players)
+-- 3. Beli Monitoring (20s No Increase -> Hop < 5 Players)
 function GetCurrentBeli()
     local data = LocalPlayer:FindFirstChild("Data") or LocalPlayer:FindFirstChild("leaderstats")
     if data and data:FindFirstChild("Beli") then return data.Beli.Value end
@@ -282,19 +282,35 @@ function GetCurrentBeli()
 end
 
 task.spawn(function()
+    print("[FARM BELI] Grace period 60s bắt đầu (Không tính tiền thời gian này)...")
     task.wait(60) -- Grace period 60s đầu tiên
+    print("[FARM BELI] Hết 60s grace period. Bắt đầu theo dõi Beli (20s check)...")
+    
     LAST_BELI_VALUE = GetCurrentBeli()
     LAST_BELI_CHANGE = os.clock()
     
     while task.wait(1) do
         local cur = GetCurrentBeli()
-        if cur ~= LAST_BELI_VALUE then
+        
+        -- Nếu tiền tăng -> Cập nhật mốc thời gian mới
+        if cur > LAST_BELI_VALUE then
             LAST_BELI_VALUE = cur
             LAST_BELI_CHANGE = os.clock()
-        elseif os.clock() - LAST_BELI_CHANGE >= 20 then
-            SendSignal("HopLowUser", {beli = cur, reason = "20s_no_beli"})
+        end
+        
+        -- Tính thời gian trôi qua kể từ lần cộng tiền cuối cùng
+        local idleTime = os.clock() - LAST_BELI_CHANGE
+        
+        -- Nếu quá 20 giây không có Beli mới -> BẮT BUỘC HOP (Dù sau đó có cộng tiền cũng hop)
+        if idleTime >= 20 then
+            print("[FARM BELI] Đã 20 giây không tăng Beli (Idle: " .. math.floor(idleTime) .. "s). Bắt đầu Hop Server ngay lập tức!")
+            SendSignal("HopLowUser", {beli = cur, reason = "20s_no_beli_increase"})
+            
+            -- Gọi smartHop ngay lập tức
             smartHopLowUser()
-            LAST_BELI_CHANGE = os.clock() -- Reset timer để tránh spam
+            
+            -- Sau khi hop xong (hoặc đang đợi), reset lại timer để không gọi liên tục trong khi đang đợi teleport
+            LAST_BELI_CHANGE = os.clock() 
         end
     end
 end)
