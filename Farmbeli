@@ -795,7 +795,7 @@ end)
 
 -- 2. Vòng lặp kiểm tra tiền & Kick Status
 spawn(function()
-    local TARGET_BELI = tonumber(_G.TargetBeli) or 500000
+    local TARGET_BELI = tonumber(_G.TargetBeli) or 2000000
     local lastTargetSignal = 0
     while task.wait(5) do
         if notifyKick() then
