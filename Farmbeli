@@ -281,21 +281,12 @@ local function comma_value(n)
 end
 
 function GetCurrentBeli()
-    -- Ưu tiên tìm trong Data (Blox Fruits thường để ở đây)
     local data = LocalPlayer:FindFirstChild("Data")
-    if data and data:FindFirstChild("Beli") then
-        return data.Beli.Value
-    end
-    -- Dự phòng trong leaderstats
+    if data and data:FindFirstChild("Beli") then return data.Beli.Value end
     local stats = LocalPlayer:FindFirstChild("leaderstats")
-    if stats and stats:FindFirstChild("Beli") then
-        return stats.Beli.Value
-    end
-    -- Dự phòng tìm bất cứ IntValue/NumberValue nào tên Beli trong Player
+    if stats and stats:FindFirstChild("Beli") then return stats.Beli.Value end
     for _, v in ipairs(LocalPlayer:GetDescendants()) do
-        if v.Name == "Beli" and (v:IsA("IntValue") or v:IsA("NumberValue")) then
-            return v.Value
-        end
+        if v.Name == "Beli" and (v:IsA("IntValue") or v:IsA("NumberValue")) then return v.Value end
     end
     return 0
 end
@@ -310,26 +301,33 @@ task.spawn(function()
     
     while task.wait(1) do
         local cur = GetCurrentBeli()
-        
-        -- Nếu tiền tăng -> Cập nhật mốc thời gian mới
-        if cur > LAST_BELI_VALUE then
-            LAST_BELI_VALUE = cur
-            LAST_BELI_CHANGE = os.clock()
-        end
-        
-        -- Tính thời gian trôi qua kể từ lần cộng tiền cuối cùng
         local idleTime = os.clock() - LAST_BELI_CHANGE
         
-        -- Nếu quá 20 giây không có Beli mới -> BẮT BUỘC HOP (Dù sau đó có cộng tiền cũng hop)
+        -- Cập nhật số giây không tăng tiền lên UI (nếu có)
+        pcall(function()
+            local ui = game:GetService("CoreGui"):FindFirstChild("JK93S_BeliUI") or LocalPlayer.PlayerGui:FindFirstChild("JK93S_BeliUI")
+            if ui and ui:FindFirstChild("MainFrame") and ui.MainFrame:FindFirstChild("IdleLabel") then
+                if idleTime > 0 then
+                    ui.MainFrame.IdleLabel.Text = "Idle: " .. math.floor(idleTime) .. "s / 20s"
+                else
+                    ui.MainFrame.IdleLabel.Text = "Status: Farming..."
+                end
+            end
+        end)
+
+        -- [BẮT BUỘC] Nếu đã đủ 20 giây -> HOP NGAY (Dù cur có lớn hơn LAST_BELI_VALUE hay không)
         if idleTime >= 20 then
-            print("[FARM BELI] Đã 20 giây không tăng Beli (Idle: " .. math.floor(idleTime) .. "s). Bắt đầu Hop Server ngay lập tức!")
-            SendSignal("HopLowUser", {beli = cur, reason = "20s_no_beli_increase"})
-            
-            -- Gọi smartHop ngay lập tức
+            print("[FARM BELI] Chốt mốc 20s không tăng Beli. Thực hiện Hop Server ngay lập tức!")
+            SendSignal("HopLowUser", {beli = cur, reason = "20s_no_beli_increase_locked"})
             smartHopLowUser()
-            
-            -- Sau khi hop xong (hoặc đang đợi), reset lại timer để không gọi liên tục trong khi đang đợi teleport
-            LAST_BELI_CHANGE = os.clock() 
+            -- Reset mốc thời gian sau khi gọi Hop để tránh spam lệnh trong khi đang đợi teleport
+            LAST_BELI_CHANGE = os.clock()
+        end
+
+        -- Cập nhật giá trị Beli cuối cùng và mốc thời gian (Chỉ khi chưa bị trigger hop)
+        if cur > LAST_BELI_VALUE and idleTime < 20 then
+            LAST_BELI_VALUE = cur
+            LAST_BELI_CHANGE = os.clock()
         end
     end
 end)
@@ -397,7 +395,8 @@ local function startCleanUI()
         screenGui.Parent = uiParent
 
         local mainFrame = Instance.new("Frame")
-        mainFrame.Size = UDim2.new(0, 300, 0, 100)
+        mainFrame.Name = "MainFrame"
+        mainFrame.Size = UDim2.new(0, 300, 0, 130) -- Tăng chiều cao để thêm dòng Idle
         mainFrame.Position = UDim2.new(0.5, -150, 0, 50)
         mainFrame.BackgroundColor3 = Color3.new(0, 0, 0)
         mainFrame.BackgroundTransparency = 0.5
@@ -409,34 +408,45 @@ local function startCleanUI()
         corner.Parent = mainFrame
 
         local userLabel = Instance.new("TextLabel")
-        userLabel.Size = UDim2.new(1, 0, 0.3, 0)
+        userLabel.Size = UDim2.new(1, 0, 0.2, 0)
         userLabel.Position = UDim2.new(0, 0, 0, 5)
         userLabel.BackgroundTransparency = 1
-        userLabel.TextColor3 = Color3.new(1, 1, 1) -- Màu trắng cho tên
-        userLabel.TextSize = 16
+        userLabel.TextColor3 = Color3.new(1, 1, 1)
+        userLabel.TextSize = 14
         userLabel.Font = Enum.Font.Gotham
         userLabel.Text = "User: " .. getUsername()
         userLabel.Parent = mainFrame
 
         local beliLabel = Instance.new("TextLabel")
-        beliLabel.Size = UDim2.new(1, 0, 0.4, 0)
-        beliLabel.Position = UDim2.new(0, 0, 0.3, 0)
+        beliLabel.Size = UDim2.new(1, 0, 0.3, 0)
+        beliLabel.Position = UDim2.new(0, 0, 0.2, 5)
         beliLabel.BackgroundTransparency = 1
-        beliLabel.TextColor3 = Color3.new(1, 1, 0) -- Màu vàng cho Beli
-        beliLabel.TextSize = 26
+        beliLabel.TextColor3 = Color3.new(1, 1, 0)
+        beliLabel.TextSize = 24
         beliLabel.Font = Enum.Font.GothamBold
         beliLabel.Text = "Beli: 0"
         beliLabel.Parent = mainFrame
 
         local addLabel = Instance.new("TextLabel")
-        addLabel.Size = UDim2.new(1, 0, 0.3, 0)
-        addLabel.Position = UDim2.new(0, 0, 0.7, 0)
+        addLabel.Size = UDim2.new(1, 0, 0.2, 0)
+        addLabel.Position = UDim2.new(0, 0, 0.5, 5)
         addLabel.BackgroundTransparency = 1
-        addLabel.TextColor3 = Color3.new(0, 1, 0) -- Màu xanh cho số cộng thêm
-        addLabel.TextSize = 18
+        addLabel.TextColor3 = Color3.new(0, 1, 0)
+        addLabel.TextSize = 16
         addLabel.Font = Enum.Font.Gotham
         addLabel.Text = ""
         addLabel.Parent = mainFrame
+
+        local idleLabel = Instance.new("TextLabel")
+        idleLabel.Name = "IdleLabel"
+        idleLabel.Size = UDim2.new(1, 0, 0.2, 0)
+        idleLabel.Position = UDim2.new(0, 0, 0.7, 5)
+        idleLabel.BackgroundTransparency = 1
+        idleLabel.TextColor3 = Color3.new(1, 0.5, 0.5) -- Màu đỏ nhạt cho cảnh báo Idle
+        idleLabel.TextSize = 16
+        idleLabel.Font = Enum.Font.GothamBold
+        idleLabel.Text = "Status: Initializing..."
+        idleLabel.Parent = mainFrame
 
         -- 4. Tắt 3D Rendering để siêu mượt (Tùy chọn: nếu anh muốn màn hình đen xì cho đỡ tốn pin)
         -- game:GetService("RunService"):Set3dRenderingEnabled(false)
