@@ -167,7 +167,13 @@ local function isKicked()
         local emsg, ecode = getGuiError()
         if emsg and #emsg > 0 then
             local t0 = string.lower(emsg)
-            local kws0 = {"disconnected","disconnect","kicked","kick","security kick","banned","not authorized","maintenance","internet","connection","same account","please rejoin","error code","mất kết nối","mã lỗi","bảo trì","kết nối lại","reconnect","restricted","277","267","268","773"}
+            local kws0 = {
+                "disconnected", "disconnect", "kicked", "kick", "security kick", "banned", "not authorized", 
+                "maintenance", "internet", "connection", "same account", "please rejoin", "error code", 
+                "mất kết nối", "mã lỗi", "bảo trì", "kết nối lại", "reconnect", "restricted", "unexpected",
+                "client behavior", "teleport", "failed", "crash", "out of memory", "experience",
+                "277", "267", "268", "773", "279", "610", "524", "529", "273"
+            }
             for _, k in ipairs(kws0) do
                 if string.find(t0, k, 1, true) then
                     return true, ecode, string.sub(emsg, 1, 300)
@@ -184,7 +190,14 @@ local function isKicked()
         local text = (text1 or "") .. " " .. (text2 or "")
         local codeFound = code1 or code2
         local t = string.lower(text or "")
-        local kws = {"disconnected","disconnect","kicked","kick","security kick","banned","not authorized","maintenance","internet","connection","same account","please rejoin","error code","mất kết nối","mã lỗi","bảo trì","kết nối lại","reconnect","restricted","bị kick","bị kích","bị đuổi","bị đá","vui lòng tham gia lại","tham gia lại","277","267","268","773"}
+        local kws = {
+            "disconnected", "disconnect", "kicked", "kick", "security kick", "banned", "not authorized", 
+            "maintenance", "internet", "connection", "same account", "please rejoin", "error code", 
+            "mất kết nối", "mã lỗi", "bảo trì", "kết nối lại", "reconnect", "restricted", "bị kick", 
+            "bị kích", "bị đuổi", "bị đá", "vui lòng tham gia lại", "tham gia lại", "không thể kết nối",
+            "mất mạng", "lỗi", "văng game", "unexpected", "client behavior", "teleport", "failed",
+            "277", "267", "268", "773", "279", "610", "524", "529", "273"
+        }
         for _, k in ipairs(kws) do
             if string.find(t, k, 1, true) then
                 return true, codeFound, string.sub(text or "", 1, 300)
@@ -282,17 +295,94 @@ function SendSignal(signalName, extraData)
     writeAppStorage(fields)
 end
 
+function SendReset(reason, code)
+    local pkgName = readPkgName()
+    local uname = getUsername()
+    local nonce = tostring(math.random(100000, 999999))
+    local data = {
+        username = uname,
+        signal = "Kicked", -- Giữ Kicked để Python handle_reset
+        reason = reason or "Unknown Error",
+        code = code or "0",
+        nonce = nonce
+    }
+    if pkgName and pkgName ~= "" and pkgName ~= "unknown" then
+        data.package = pkgName
+    end
+
+    local body = HttpService:JSONEncode(data)
+    local req = (syn and syn.request) or (http and http.request) or http_request or request
+
+    for _, base in ipairs(BASES) do
+        -- 1. Gửi tới /reset_game (Lệnh trực tiếp)
+        pcall(function()
+            local url = base .. "/reset_game"
+            if req then
+                req({
+                    Url = url,
+                    Method = "POST",
+                    Headers = {["Content-Type"] = "application/json"},
+                    Body = body
+                })
+            else
+                HttpService:RequestAsync({
+                    Url = url,
+                    Method = "POST",
+                    Headers = {["Content-Type"] = "application/json"},
+                    Body = body
+                })
+            end
+        end)
+
+        -- 2. Gửi tới /signal?signal=Kicked (Redundancy)
+        pcall(function()
+            local url = base .. "/signal?signal=Kicked&username=" .. urlEncode(uname) .. "&package=" .. urlEncode(pkgName or "")
+            if req then
+                req({Url = url, Method = "GET"})
+            else
+                HttpService:RequestAsync({Url = url, Method = "GET"})
+            end
+        end)
+    end
+
+    -- 3. Ghi vào appStorage (Backup nếu mất mạng/HTTP lỗi)
+    local fields = {
+        username = uname,
+        Signal = "Kicked",
+        Reason = reason,
+        Code = code,
+        Nonce = nonce,
+        Heartbeat = os.time()
+    }
+    if pkgName and pkgName ~= "" and pkgName ~= "unknown" then
+        fields.PkgName = pkgName
+    end
+    writeAppStorage(fields)
+    print("[RESET] Đã gửi tín hiệu reset cho Python: " .. tostring(reason))
+end
+
 local LAST_KICK_SENT = 0
 local function notifyKick()
     local kicked, code, snippet = isKicked()
+    
+    -- Check thêm lỗi Teleport bị kẹt
+    if not kicked then
+        if TELEPORT_FAIL_TS > 0 and os.clock() - TELEPORT_FAIL_TS < 10 then
+            kicked = true
+            code = tostring(TELEPORT_FAIL_RESULT)
+            snippet = "Teleport Failed: " .. tostring(TELEPORT_FAIL_MSG)
+        end
+    end
+
     if not kicked then
         return false
     end
+    
     local now = os.clock()
     if now - LAST_KICK_SENT >= 8 then
         LAST_KICK_SENT = now
         pcall(function()
-            SendSignal("Kicked", {code = code or "", msg = snippet or ""})
+            SendReset(snippet, code)
         end)
     end
     return true
@@ -586,6 +676,8 @@ spawn(function()
     end)
     if not success then
         print("[ERROR] Lỗi tải script farm: " .. tostring(err))
+        task.wait(2)
+        SendReset("Loadstring Error: " .. tostring(err), "lua_err")
     end
 end)
 
