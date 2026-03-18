@@ -196,7 +196,6 @@ local function isKicked()
                 "maintenance", "same account", "error code", 
                 "mất kết nối", "mã lỗi", "bảo trì", "kết nối lại", "restricted", "unexpected",
                 "client behavior", "out of memory",
-                "277", "267", "268", "773", "279", "610", "524", "529", "273"
             }
             for _, k in ipairs(kws0) do
                 if string.find(t0, k, 1, true) then
