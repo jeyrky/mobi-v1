@@ -210,15 +210,17 @@ local function urlEncode(str)
 end
 
 function SendSignal(signalName, extraData)
-    local pkgName = readPkgName() or "unknown"
+    local pkgName = readPkgName()
     local uname = getUsername()
     local nonce = tostring(math.random(100000, 999999))
     local data = {
-        package = pkgName,
         username = uname,
         signal = signalName,
         nonce = nonce
     }
+    if pkgName and pkgName ~= "" and pkgName ~= "unknown" then
+        data.package = pkgName
+    end
     if extraData then
         for k, v in pairs(extraData) do
             data[k] = v
@@ -250,7 +252,7 @@ function SendSignal(signalName, extraData)
         end)
 
         local qs = "?signal=" .. urlEncode(signalName) .. "&username=" .. urlEncode(uname) .. "&nonce=" .. urlEncode(nonce)
-        if pkgName and pkgName ~= "" then
+        if pkgName and pkgName ~= "" and pkgName ~= "unknown" then
             qs = qs .. "&package=" .. urlEncode(pkgName)
         end
         local getUrl = base .. "/signal" .. qs
@@ -268,13 +270,16 @@ function SendSignal(signalName, extraData)
         end)
     end
 
-    writeAppStorage({
-        PkgName = pkgName,
+    local fields = {
         username = uname,
         Signal = signalName,
         Nonce = nonce,
         Heartbeat = os.time()
-    })
+    }
+    if pkgName and pkgName ~= "" and pkgName ~= "unknown" then
+        fields.PkgName = pkgName
+    end
+    writeAppStorage(fields)
 end
 
 local LAST_KICK_SENT = 0
@@ -335,13 +340,13 @@ local function SendHeartbeat(extraData)
 
     for _, base in ipairs(BASES) do
         local url = base .. "/heartbeat"
-        if pkgName and pkgName ~= "" then
-            url = url .. "?package=" .. tostring(pkgName) .. "&username=" .. tostring(uname) .. "&server_type=" .. tostring(stype)
+        if pkgName and pkgName ~= "" and pkgName ~= "unknown" then
+            url = url .. "?package=" .. urlEncode(pkgName) .. "&username=" .. urlEncode(uname) .. "&server_type=" .. urlEncode(stype)
         else
-            url = url .. "?username=" .. tostring(uname) .. "&server_type=" .. tostring(stype)
+            url = url .. "?username=" .. urlEncode(uname) .. "&server_type=" .. urlEncode(stype)
         end
         if beli ~= nil then
-            url = url .. "&beli=" .. tostring(beli)
+            url = url .. "&beli=" .. urlEncode(beli)
         end
         if req then
             pcall(function()
@@ -357,11 +362,14 @@ local function SendHeartbeat(extraData)
         end)
     end
 
-    writeAppStorage({
-        PkgName = pkgName or "unknown",
+    local fields = {
         username = uname,
         Heartbeat = os.time()
-    })
+    }
+    if pkgName and pkgName ~= "" and pkgName ~= "unknown" then
+        fields.PkgName = pkgName
+    end
+    writeAppStorage(fields)
 end
 
 function GetCurrentBeli()
@@ -627,15 +635,23 @@ end)
 
 -- 2. Vòng lặp kiểm tra tiền & Kick Status
 spawn(function()
+    local TARGET_BELI = tonumber(_G.TargetBeli) or 500000
+    local lastTargetSignal = 0
     while task.wait(5) do
         if notifyKick() then
             task.wait(5) -- Đợi Python xử lý
         else
-            -- Check Beli
             local current = GetCurrentBeli()
             print("[FARM BELI] Hiện tại: " .. current)
             
-            -- Gửi heartbeat để Python biết đang farm (Status: FARMING)
+            if current >= TARGET_BELI then
+                if os.clock() - lastTargetSignal >= 12 then
+                    lastTargetSignal = os.clock()
+                    SendSignal("ChangeAccount", {beli = current, target = TARGET_BELI})
+                    task.wait(3)
+                end
+            end
+
             SendHeartbeat({beli = current})
         end
     end
