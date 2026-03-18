@@ -1,5 +1,5 @@
--- [JK93S] Auto Farm Beli & Signal to Python
--- Updated: Auto Choose Team & Auto Rejoin/Kick Detection
+-- [JK93S] Auto Farm Beli & Signal to Python (V3)
+-- Updated: 20s No Beli -> Hop < 5 Players | 10s Heartbeat/Beli | Kick -> Reset Roblox
 -- Script gốc: https://raw.githubusercontent.com/trongdeptraihucscript/Main/refs/heads/main/TN-Tp-Chest.lua
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -19,6 +19,12 @@ local BASES = {
     "http://127.0.0.1:" .. tostring(PORT),
     "http://10.0.2.2:" .. tostring(PORT)
 }
+
+local TARGET_BELI = tonumber(_G.TargetBeli) or 2000000
+local START_TIME = os.clock()
+local LAST_BELI_CHANGE = os.clock()
+local LAST_BELI_VALUE = 0
+local HOPPING = false
 
 local function readPkgName()
     local pkg = nil
@@ -48,215 +54,21 @@ end
 
 local function writeAppStorage(fields)
     pcall(function()
-        if not writefile then
-            return
-        end
+        if not writefile then return end
         local js = {}
         if isfile and isfile("appStorage.json") then
             local content = readfile("appStorage.json")
             if content and #content > 0 then
                 local ok, decoded = pcall(HttpService.JSONDecode, HttpService, content)
-                if ok and type(decoded) == "table" then
-                    js = decoded
-                end
+                if ok and type(decoded) == "table" then js = decoded end
             end
         end
-        for k, v in pairs(fields) do
-            js[k] = v
-        end
+        for k, v in pairs(fields) do js[k] = v end
         writefile("appStorage.json", HttpService:JSONEncode(js))
-        pcall(function()
-            writefile("../appStorage.json", HttpService:JSONEncode(js))
-        end)
+        pcall(function() writefile("../appStorage.json", HttpService:JSONEncode(js)) end)
     end)
 end
 
---------------------------------------------------------------------------------
--- AUTO CHOOSE TEAM (PIRATES)
---------------------------------------------------------------------------------
-local function autoChooseTeam()
-    local teamName = "Pirates"
-    local commF = ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("CommF_")
-    if commF and commF:IsA("RemoteFunction") then
-        pcall(function() commF:InvokeServer("SetTeam", teamName) end)
-    end
-    task.wait(1)
-    if LocalPlayer.Team == nil then
-        local function click(btn)
-            if not btn then return end
-            local vim = game:GetService("VirtualInputManager")
-            local pos = btn.AbsolutePosition + (btn.AbsoluteSize/2)
-            vim:SendMouseButtonEvent(pos.X, pos.Y, 0, true, btn, 0)
-            vim:SendMouseButtonEvent(pos.X, pos.Y, 0, false, btn, 0)
-        end
-        
-        -- Click UI Button
-        for _, v in ipairs(game:GetService("CoreGui"):GetDescendants()) do
-            if (v:IsA("TextButton") or v:IsA("ImageButton")) and (v.Name:lower():find("pirate") or (v.Text and v.Text:lower():find("pirate"))) then
-                click(v) break
-            end
-        end
-        for _, v in ipairs(LocalPlayer.PlayerGui:GetDescendants()) do
-             if (v:IsA("TextButton") or v:IsA("ImageButton")) and (v.Name:lower():find("pirate") or (v.Text and v.Text:lower():find("pirate"))) then
-                click(v) break
-            end
-        end
-    end
-end
-
--- Chạy chọn phe liên tục đến khi vào được team
-task.spawn(function()
-    local t0 = os.clock()
-    while LocalPlayer.Team == nil and os.clock() - t0 < 30 do
-        autoChooseTeam()
-        task.wait(1)
-    end
-end)
-
---------------------------------------------------------------------------------
--- ANTI AFK & KICK DETECTION
---------------------------------------------------------------------------------
-LocalPlayer.Idled:Connect(function()
-    pcall(function()
-        VirtualUser:Button2Down(Vector2.new(0,0), workspace.CurrentCamera and workspace.CurrentCamera.CFrame or CFrame.new())
-        task.wait(1)
-        VirtualUser:Button2Up(Vector2.new(0,0), workspace.CurrentCamera and workspace.CurrentCamera.CFrame or CFrame.new())
-    end)
-end)
-
-local function isKicked()
-    local function getGuiError()
-        local msg = ""
-        local ok = pcall(function()
-            msg = GuiService.ErrorMessage
-        end)
-        if ok and msg and #tostring(msg) > 0 then
-            local s = tostring(msg)
-            local code = string.match(s, "(%d%d%d)")
-            return s, code
-        end
-        return "", nil
-    end
-
-    local function collectText(root)
-        if not root then return "", nil end
-        local out = {}
-        local code = nil
-        -- Chỉ quét tối đa 50 descendants để tránh lag và chỉ quét TextLabel/TextButton có liên quan đến thông báo lỗi
-        local count = 0
-        for _, d in ipairs(root:GetDescendants()) do
-            count = count + 1
-            if count > 100 then break end
-            
-            if d:IsA("TextLabel") or d:IsA("TextButton") then
-                local t = d.Text
-                if t and #t > 0 then
-                    -- Kiểm tra xem TextLabel này có nằm trong một khung thông báo (Prompt) không
-                    local isPrompt = false
-                    local p = d.Parent
-                    while p and p ~= root do
-                        if string.find(string.lower(p.Name), "prompt") or string.find(string.lower(p.Name), "error") or string.find(string.lower(p.Name), "message") then
-                            isPrompt = true
-                            break
-                        end
-                        p = p.Parent
-                    end
-
-                    if isPrompt or root.Name == "RobloxPromptGui" then
-                        table.insert(out, t)
-                        if not code then
-                            local c = string.match(t, "[Ee]rror%s*[Cc]ode%s*:?%s*(%d%d%d)")
-                            if c then
-                                code = c
-                            end
-                        end
-                    end
-                end
-            end
-        end
-        return table.concat(out, " | "), code
-    end
-
-    local ok, kicked, code, snippet = pcall(function()
-        -- Không check khi mới vào game dưới 10 giây để tránh nhận diện nhầm UI đang load
-        if os.clock() < 10 then
-            return false
-        end
-
-        if not game.Players.LocalPlayer or not game.Players.LocalPlayer.Parent then
-            return true, "offline", "player_nil"
-        end
-
-        local emsg, ecode = getGuiError()
-        if emsg and #emsg > 0 then
-            local t0 = string.lower(emsg)
-            -- Các từ khóa lỗi nghiêm trọng từ Roblox (GuiService)
-            local kws0 = {
-                "disconnected", "kicked", "security kick", "banned", "not authorized", 
-                "maintenance", "same account", "error code", 
-                "mất kết nối", "mã lỗi", "bảo trì", "kết nối lại", "restricted", "unexpected",
-                "client behavior", "out of memory",
-            }
-            for _, k in ipairs(kws0) do
-                if string.find(t0, k, 1, true) then
-                    return true, ecode, string.sub(emsg, 1, 300)
-                end
-            end
-        end
-
-        local coreGui = game:GetService("CoreGui")
-        local promptGui = coreGui:FindFirstChild("RobloxPromptGui")
-        local text1, code1 = collectText(promptGui)
-        
-        -- Chỉ quét PlayerGui nếu thực sự có thông báo lỗi hiện lên
-        local text2, code2 = "", nil
-        local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
-        if pg then
-            -- Chỉ quét các UI có tên chứa 'Error', 'Prompt', 'Disconnect' trong PlayerGui
-            for _, v in ipairs(pg:GetChildren()) do
-                local name = string.lower(v.Name)
-                if string.find(name, "error") or string.find(name, "prompt") or string.find(name, "disconnect") or string.find(name, "kick") then
-                    local t, c = collectText(v)
-                    if t and #t > 0 then
-                        text2 = text2 .. " " .. t
-                        code2 = code2 or c
-                    end
-                end
-            end
-        end
-
-        local text = (text1 or "") .. " " .. (text2 or "")
-        local codeFound = code1 or code2
-        local t = string.lower(text or "")
-        
-        -- Các từ khóa lỗi nghiêm trọng từ UI
-        local kws = {
-            "disconnected", "kicked", "security kick", "banned", "not authorized", 
-            "maintenance", "same account", "error code", 
-            "mất kết nối", "mã lỗi", "bảo trì", "kết nối lại", "restricted", "bị kick", 
-            "bị kích", "bị đuổi", "bị đá", "vui lòng tham gia lại", "không thể kết nối",
-            "mất mạng", "văng game", "unexpected client behavior",
-            "277", "267", "268", "773", "279", "610", "524", "529", "273"
-        }
-        
-        for _, k in ipairs(kws) do
-            if string.find(t, k, 1, true) then
-                -- Tránh nhận diện nhầm các từ khóa thông thường
-                if (k == "teleport" and not string.find(t, "failed")) or (k == "lỗi" and (string.find(t, "chọn") or string.find(t, "đổi"))) then
-                    continue
-                end
-                return true, codeFound, string.sub(text or "", 1, 300)
-            end
-        end
-        return false
-    end)
-    if ok then return kicked == true, code, snippet end
-    return false
-end
-
---------------------------------------------------------------------------------
--- SIGNAL SENDER
---------------------------------------------------------------------------------
 local function urlEncode(str)
     if str == nil then return "" end
     str = tostring(str)
@@ -276,68 +88,23 @@ function SendSignal(signalName, extraData)
         signal = signalName,
         nonce = nonce
     }
-    if pkgName and pkgName ~= "" and pkgName ~= "unknown" then
-        data.package = pkgName
-    end
-    if extraData then
-        for k, v in pairs(extraData) do
-            data[k] = v
-        end
-    end
+    if pkgName and pkgName ~= "" and pkgName ~= "unknown" then data.package = pkgName end
+    if extraData then for k, v in pairs(extraData) do data[k] = v end end
     
     local body = HttpService:JSONEncode(data)
     local req = (syn and syn.request) or (http and http.request) or http_request or request
 
     for _, base in ipairs(BASES) do
         local url = base .. "/signal"
-        if req then
-            pcall(function()
-                req({
-                    Url = url,
-                    Method = "POST",
-                    Headers = {["Content-Type"] = "application/json"},
-                    Body = body
-                })
-            end)
-        end
         pcall(function()
-            HttpService:RequestAsync({
-                Url = url,
-                Method = "POST",
-                Headers = {["Content-Type"] = "application/json"},
-                Body = body
-            })
-        end)
-
-        local qs = "?signal=" .. urlEncode(signalName) .. "&username=" .. urlEncode(uname) .. "&nonce=" .. urlEncode(nonce)
-        if pkgName and pkgName ~= "" and pkgName ~= "unknown" then
-            qs = qs .. "&package=" .. urlEncode(pkgName)
-        end
-        local getUrl = base .. "/signal" .. qs
-        if req then
-            pcall(function()
-                req({Url = getUrl, Method = "GET"})
-            end)
-        end
-        pcall(function()
-            HttpService:RequestAsync({
-                Url = getUrl,
-                Method = "GET",
-                Headers = {["Content-Type"] = "application/json"}
-            })
+            if req then
+                req({Url = url, Method = "POST", Headers = {["Content-Type"] = "application/json"}, Body = body})
+            else
+                HttpService:RequestAsync({Url = url, Method = "POST", Headers = {["Content-Type"] = "application/json"}, Body = body})
+            end
         end)
     end
-
-    local fields = {
-        username = uname,
-        Signal = signalName,
-        Nonce = nonce,
-        Heartbeat = os.time()
-    }
-    if pkgName and pkgName ~= "" and pkgName ~= "unknown" then
-        fields.PkgName = pkgName
-    end
-    writeAppStorage(fields)
+    writeAppStorage({username = uname, Signal = signalName, Nonce = nonce, Heartbeat = os.time(), PkgName = pkgName})
 end
 
 function SendReset(reason, code)
@@ -346,42 +113,44 @@ function SendReset(reason, code)
     local nonce = tostring(math.random(100000, 999999))
     local data = {
         username = uname,
-        signal = "Kicked", -- Giữ Kicked để Python handle_reset
-        reason = reason or "Unknown Error",
+        signal = "Kicked",
+        reason = reason or "Unknown",
         code = code or "0",
         nonce = nonce
     }
-    if pkgName and pkgName ~= "" and pkgName ~= "unknown" then
-        data.package = pkgName
-    end
-
-    local body = HttpService:JSONEncode(data)
-    local req = (syn and syn.request) or (http and http.request) or http_request or request
-
+    if pkgName and pkgName ~= "" and pkgName ~= "unknown" then data.package = pkgName end
+    
     for _, base in ipairs(BASES) do
-        -- 1. Gửi tới /reset_game (Lệnh trực tiếp)
         pcall(function()
             local url = base .. "/reset_game"
+            local req = (syn and syn.request) or (http and http.request) or http_request or request
             if req then
-                req({
-                    Url = url,
-                    Method = "POST",
-                    Headers = {["Content-Type"] = "application/json"},
-                    Body = body
-                })
+                req({Url = url, Method = "POST", Headers = {["Content-Type"] = "application/json"}, Body = HttpService:JSONEncode(data)})
             else
-                HttpService:RequestAsync({
-                    Url = url,
-                    Method = "POST",
-                    Headers = {["Content-Type"] = "application/json"},
-                    Body = body
-                })
+                HttpService:RequestAsync({Url = url, Method = "POST", Headers = {["Content-Type"] = "application/json"}, Body = HttpService:JSONEncode(data)})
             end
         end)
+    end
+    writeAppStorage({username = uname, Signal = "Kicked", Reason = reason, Code = code, Nonce = nonce, Heartbeat = os.time(), PkgName = pkgName})
+    print("[RESET] Tín hiệu Reset đã được gửi: " .. tostring(reason))
+end
 
-        -- 2. Gửi tới /signal?signal=Kicked (Redundancy)
+function SendHeartbeat(beliValue)
+    local pkgName = readPkgName()
+    local uname = getUsername()
+    local data = {
+        username = uname,
+        beli = beliValue or 0,
+        server_type = "FARM",
+        Heartbeat = os.time()
+    }
+    if pkgName and pkgName ~= "" and pkgName ~= "unknown" then data.package = pkgName end
+    
+    for _, base in ipairs(BASES) do
         pcall(function()
-            local url = base .. "/signal?signal=Kicked&username=" .. urlEncode(uname) .. "&package=" .. urlEncode(pkgName or "")
+            local url = base .. "/heartbeat?username=" .. urlEncode(uname) .. "&beli=" .. urlEncode(data.beli) .. "&server_type=FARM"
+            if pkgName then url = url .. "&package=" .. urlEncode(pkgName) end
+            local req = (syn and syn.request) or (http and http.request) or http_request or request
             if req then
                 req({Url = url, Method = "GET"})
             else
@@ -389,430 +158,187 @@ function SendReset(reason, code)
             end
         end)
     end
-
-    -- 3. Ghi vào appStorage (Backup nếu mất mạng/HTTP lỗi)
-    local fields = {
-        username = uname,
-        Signal = "Kicked",
-        Reason = reason,
-        Code = code,
-        Nonce = nonce,
-        Heartbeat = os.time()
-    }
-    if pkgName and pkgName ~= "" and pkgName ~= "unknown" then
-        fields.PkgName = pkgName
-    end
-    writeAppStorage(fields)
-    print("[RESET] Đã gửi tín hiệu reset cho Python: " .. tostring(reason))
+    writeAppStorage({username = uname, Heartbeat = os.time(), beli = data.beli, PkgName = pkgName})
 end
 
-local LAST_KICK_SENT = 0
-local function notifyKick()
-    local kicked, code, snippet = isKicked()
-    
-    -- Check thêm lỗi Teleport bị kẹt
-    if not kicked then
-        -- Tăng thời gian check lên 15s và chỉ check khi đã vào game đủ lâu (>20s)
-        if os.clock() > 20 and TELEPORT_FAIL_TS > 0 and os.clock() - TELEPORT_FAIL_TS < 15 then
-            kicked = true
-            code = tostring(TELEPORT_FAIL_RESULT)
-            snippet = "Teleport Failed: " .. tostring(TELEPORT_FAIL_MSG)
+--------------------------------------------------------------------------------
+-- AUTO CHOOSE TEAM (PIRATES)
+--------------------------------------------------------------------------------
+local function autoChooseTeam()
+    local teamName = "Pirates"
+    local commF = ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("CommF_")
+    if commF and commF:IsA("RemoteFunction") then
+        pcall(function() commF:InvokeServer("SetTeam", teamName) end)
+    end
+    task.wait(1)
+    if LocalPlayer.Team == nil then
+        for _, v in ipairs(game:GetService("CoreGui"):GetDescendants()) do
+            if (v:IsA("TextButton") or v:IsA("ImageButton")) and (v.Name:lower():find("pirate") or (v.Text and v.Text:lower():find("pirate"))) then
+                local vim = game:GetService("VirtualInputManager")
+                local pos = v.AbsolutePosition + (v.AbsoluteSize/2)
+                vim:SendMouseButtonEvent(pos.X, pos.Y, 0, true, v, 0)
+                vim:SendMouseButtonEvent(pos.X, pos.Y, 0, false, v, 0)
+                break
+            end
         end
     end
-
-    if not kicked then
-        return false
-    end
-    
-    local now = os.clock()
-    -- Giãn cách gửi tín hiệu Reset ít nhất 15 giây để tránh spam reset loop
-    if now - LAST_KICK_SENT >= 15 then
-        LAST_KICK_SENT = now
-        pcall(function()
-            SendReset(snippet, code)
-        end)
-    end
-    return true
 end
 
-task.spawn(function()
-    while task.wait(2) do
-        notifyKick()
-    end
-end)
+--------------------------------------------------------------------------------
+-- KICK DETECTION
+--------------------------------------------------------------------------------
+local function isKicked()
+    local ok, kicked, code, snippet = pcall(function()
+        if os.clock() < 10 then return false end
+        if not game.Players.LocalPlayer or not game.Players.LocalPlayer.Parent then return true, "offline", "player_nil" end
 
-task.spawn(function()
-    local cg = game:GetService("CoreGui")
-    -- Chỉ hook CoreGui vì lỗi Roblox thường hiện ở đây. PlayerGui quét định kỳ là đủ.
-    local function hook(container)
-        if not container then return end
-        pcall(function()
-            container.DescendantAdded:Connect(function()
-                -- Giới hạn tần suất check từ sự kiện
-                if os.clock() - LAST_KICK_SENT > 5 then
-                    task.wait(0.5)
-                    notifyKick()
+        local emsg = GuiService.ErrorMessage
+        if emsg and #emsg > 0 then
+            local t0 = string.lower(emsg)
+            local kws0 = {"disconnected", "kicked", "security kick", "banned", "maintenance", "same account", "error code", "mất kết nối", "mã lỗi", "bảo trì", "restricted", "unexpected", "client behavior", "out of memory"}
+            for _, k in ipairs(kws0) do if string.find(t0, k, 1, true) then return true, "gui_err", emsg end end
+        end
+
+        local coreGui = game:GetService("CoreGui")
+        local promptGui = coreGui:FindFirstChild("RobloxPromptGui")
+        if promptGui then
+            for _, d in ipairs(promptGui:GetDescendants()) do
+                if (d:IsA("TextLabel") or d:IsA("TextButton")) and d.Text and #d.Text > 0 then
+                    local t = string.lower(d.Text)
+                    local kws = {"disconnected", "kicked", "security kick", "banned", "maintenance", "same account", "error code", "mất kết nối", "mã lỗi", "bị kick", "vui lòng tham gia lại", "không thể kết nối", "mất mạng", "văng game", "unexpected client behavior"}
+                    for _, k in ipairs(kws) do if string.find(t, k, 1, true) then return true, "prompt_err", d.Text end end
                 end
-            end)
-        end)
+            end
+        end
+        return false
+    end)
+    if ok then return kicked == true, code, snippet end
+    return false
+end
+
+--------------------------------------------------------------------------------
+-- SMART HOP (TARGET < 5 PLAYERS)
+--------------------------------------------------------------------------------
+local function smartHopLowUser()
+    if HOPPING then return end
+    HOPPING = true
+    print("[FARM BELI] Đang tìm server ít người (< 5 người)...")
+    
+    local function scan()
+        local req = (syn and syn.request) or http_request or request
+        if not req then return nil end
+        local url = "https://games.roblox.com/v1/games/" .. tostring(game.PlaceId) .. "/servers/Public?sortOrder=Asc&limit=100"
+        local ok, res = pcall(function() return req({Url = url, Method = "GET"}) end)
+        if ok and res and res.Body then
+            local data = HttpService:JSONDecode(res.Body)
+            if data and data.data then
+                local candidates = {}
+                for _, s in ipairs(data.data) do
+                    if s.id and s.id ~= game.JobId and (s.playing or 0) < 5 then
+                        table.insert(candidates, s.id)
+                    end
+                end
+                if #candidates > 0 then return candidates[math.random(1, #candidates)] end
+            end
+        end
+        return nil
     end
-    hook(cg)
+
+    local serverId = scan()
+    if serverId then
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId, LocalPlayer)
+    else
+        TeleportService:Teleport(game.PlaceId, LocalPlayer)
+    end
+    task.wait(10)
+    HOPPING = false
+end
+
+--------------------------------------------------------------------------------
+-- MAIN LOOPS
+--------------------------------------------------------------------------------
+
+-- 1. Auto Choose Team
+task.spawn(function()
+    while LocalPlayer.Team == nil and os.clock() - START_TIME < 30 do
+        autoChooseTeam()
+        task.wait(1)
+    end
 end)
 
-pcall(function()
-    GuiService.ErrorMessageChanged:Connect(function()
-        task.wait(0.1)
-        notifyKick()
+-- 2. Anti AFK
+LocalPlayer.Idled:Connect(function()
+    pcall(function()
+        VirtualUser:Button2Down(Vector2.new(0,0), workspace.CurrentCamera and workspace.CurrentCamera.CFrame or CFrame.new())
+        task.wait(1)
+        VirtualUser:Button2Up(Vector2.new(0,0), workspace.CurrentCamera and workspace.CurrentCamera.CFrame or CFrame.new())
     end)
 end)
 
-local function SendHeartbeat(extraData)
-    local pkgName = readPkgName()
-    local uname = getUsername()
-    local stype = "FARM"
-    local beli = nil
-    if extraData and extraData.beli ~= nil then
-        beli = extraData.beli
-    end
-
-    local req = (syn and syn.request) or (http and http.request) or http_request or request
-
-    for _, base in ipairs(BASES) do
-        local url = base .. "/heartbeat"
-        if pkgName and pkgName ~= "" and pkgName ~= "unknown" then
-            url = url .. "?package=" .. urlEncode(pkgName) .. "&username=" .. urlEncode(uname) .. "&server_type=" .. urlEncode(stype)
-        else
-            url = url .. "?username=" .. urlEncode(uname) .. "&server_type=" .. urlEncode(stype)
-        end
-        if beli ~= nil then
-            url = url .. "&beli=" .. urlEncode(beli)
-        end
-        if req then
-            pcall(function()
-                req({Url = url, Method = "GET"})
-            end)
-        end
-        pcall(function()
-            HttpService:RequestAsync({
-                Url = url,
-                Method = "GET",
-                Headers = {["Content-Type"] = "application/json"}
-            })
-        end)
-    end
-
-    local fields = {
-        username = uname,
-        Heartbeat = os.time()
-    }
-    if pkgName and pkgName ~= "" and pkgName ~= "unknown" then
-        fields.PkgName = pkgName
-    end
-    writeAppStorage(fields)
-end
-
+-- 3. Beli Monitoring (20s No Change -> Hop < 5 Players)
 function GetCurrentBeli()
-    if LocalPlayer:FindFirstChild("Data") and LocalPlayer.Data:FindFirstChild("Beli") then
-        return LocalPlayer.Data.Beli.Value
-    end
-    if LocalPlayer:FindFirstChild("leaderstats") and LocalPlayer.leaderstats:FindFirstChild("Beli") then
-         return LocalPlayer.leaderstats.Beli.Value
-    end
+    local data = LocalPlayer:FindFirstChild("Data") or LocalPlayer:FindFirstChild("leaderstats")
+    if data and data:FindFirstChild("Beli") then return data.Beli.Value end
     return 0
 end
 
---------------------------------------------------------------------------------
--- MAIN LOGIC
---------------------------------------------------------------------------------
-
-local VISITED_FILE = "beli_visited.json"
-local function loadVisited()
-    local list = {}
-    local s, content = pcall(readfile, VISITED_FILE)
-    if s and content then
-        local s2, decoded = pcall(HttpService.JSONDecode, HttpService, content)
-        if s2 and decoded then list = decoded end
-    end
-    return list
-end
-
-local function saveVisited(jobId)
-    local list = loadVisited()
-    for _, id in ipairs(list) do
-        if id == jobId then return end
-    end
-    table.insert(list, jobId)
-    local limit = 300
-    while #list > limit do
-        table.remove(list, 1)
-    end
-    pcall(writefile, VISITED_FILE, HttpService:JSONEncode(list))
-end
-
-local TELEPORT_FAIL_TS = 0
-local TELEPORT_FAIL_RESULT = nil
-local TELEPORT_FAIL_MSG = nil
-local TELEPORT_HOOKED = false
-local HOP_TOKEN = 0
-
-local function ensureTeleportHooks()
-    if TELEPORT_HOOKED then
-        return
-    end
-    TELEPORT_HOOKED = true
-    pcall(function()
-        TeleportService.TeleportInitFailed:Connect(function(player, result, message)
-            if player == LocalPlayer then
-                TELEPORT_FAIL_TS = os.clock()
-                TELEPORT_FAIL_RESULT = result
-                TELEPORT_FAIL_MSG = message
-            end
-        end)
-    end)
-    pcall(function()
-        if TeleportService.TeleportFailed then
-            TeleportService.TeleportFailed:Connect(function(player, result, message)
-                if player == LocalPlayer then
-                    TELEPORT_FAIL_TS = os.clock()
-                    TELEPORT_FAIL_RESULT = result
-                    TELEPORT_FAIL_MSG = message
-                end
-            end)
+task.spawn(function()
+    task.wait(60) -- Grace period 60s đầu tiên
+    LAST_BELI_VALUE = GetCurrentBeli()
+    LAST_BELI_CHANGE = os.clock()
+    
+    while task.wait(1) do
+        local cur = GetCurrentBeli()
+        if cur ~= LAST_BELI_VALUE then
+            LAST_BELI_VALUE = cur
+            LAST_BELI_CHANGE = os.clock()
+        elseif os.clock() - LAST_BELI_CHANGE >= 20 then
+            SendSignal("HopLowUser", {beli = cur, reason = "20s_no_beli"})
+            smartHopLowUser()
+            LAST_BELI_CHANGE = os.clock() -- Reset timer để tránh spam
         end
-    end)
-end
-
-pcall(function()
-    saveVisited(game.JobId)
+    end
 end)
 
-local function smartHopLowUser()
-    HOP_TOKEN = HOP_TOKEN + 1
-    local hopToken = HOP_TOKEN
-    local startJobId = game.JobId
-
-    local visited = loadVisited()
-    local visitedSet = {}
-    for _, id in ipairs(visited) do visitedSet[id] = true end
-
-    ensureTeleportHooks()
-
-    local minFreeSlots = 3
-    local maxScanPages = 10
-    local maxCandidates = 35
-    local maxTeleportTries = 8
-    local teleportWait = 12
-    local failWindow = 4
-
-    local function isGameFull(result, message)
-        local r = tostring(result or "")
-        local m = tostring(message or "")
-        r = string.lower(r)
-        m = string.lower(m)
-        if string.find(r, "gamefull") then return true end
-        if string.find(m, "full") then return true end
-        if string.find(m, "maximum") and string.find(m, "players") then return true end
-        return false
-    end
-
-    local function tryTeleportTo(serverId)
-        local startTs = TELEPORT_FAIL_TS
-        local ok = pcall(function()
-            TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId, LocalPlayer)
-        end)
-        if not ok then
-            return false, "pcall_failed", nil
-        end
-        local t0 = os.clock()
-        while os.clock() - t0 < failWindow do
-            if TELEPORT_FAIL_TS ~= startTs then
-                return false, TELEPORT_FAIL_RESULT, TELEPORT_FAIL_MSG
-            end
-            task.wait(0.2)
-        end
-        task.spawn(function()
-            task.wait(teleportWait)
-            if HOP_TOKEN == hopToken and game.JobId == startJobId then
-                smartHopLowUser()
-            end
-        end)
-        return true, nil, nil
-    end
-
-    local req = (syn and syn.request) or http_request or request
-    local candidates = {}
-
-    local function scanServers(minSlots)
-        local out = {}
-        local cur = ""
-        for i = 1, maxScanPages do
-            local url = "https://games.roblox.com/v1/games/" .. tostring(game.PlaceId) .. "/servers/Public?sortOrder=Asc&limit=100&cursor=" .. cur
-            local ok, res = pcall(function() return req({Url = url, Method = "GET"}) end)
-            if ok and res and res.Body then
-                local data = HttpService:JSONDecode(res.Body)
-                if data and data.data then
-                    for _, server in ipairs(data.data) do
-                        local playing = server.playing or 0
-                        local maxPlayers = server.maxPlayers or 12
-                        local free = (maxPlayers - playing)
-                        if server.id and server.id ~= game.JobId and free >= minSlots and not visitedSet[server.id] then
-                            table.insert(out, {id = server.id, playing = playing, free = free})
-                            if #out >= maxCandidates then
-                                break
-                            end
-                        end
-                    end
-                end
-                if #out >= maxCandidates then break end
-                if data and data.nextPageCursor then cur = data.nextPageCursor else break end
-            end
-            task.wait(0.1)
-        end
-        return out
-    end
-
-    if req then
-        candidates = scanServers(minFreeSlots)
-        if #candidates == 0 then
-            candidates = scanServers(1)
-        end
-    end
-
-    if #candidates > 0 then
-        table.sort(candidates, function(a, b)
-            return (a.playing or 0) < (b.playing or 0)
-        end)
-
-        local topN = math.min(#candidates, 12)
-        local picks = {}
-        for i = 1, topN do
-            table.insert(picks, candidates[i])
-        end
-        for i = #picks, 2, -1 do
-            local j = math.random(1, i)
-            picks[i], picks[j] = picks[j], picks[i]
-        end
-
-        local tries = 0
-        for _, s in ipairs(picks) do
-            tries = tries + 1
-            if tries > maxTeleportTries then break end
-            local ok, r, m = tryTeleportTo(s.id)
-            if ok then
-                pcall(function()
-                    saveVisited(s.id)
-                end)
-                return
-            else
-                if not isGameFull(r, m) then
-                    pcall(function()
-                        saveVisited(s.id)
-                    end)
-                end
-                task.wait(0.4)
-            end
-        end
-    end
-
-    TeleportService:Teleport(game.PlaceId, LocalPlayer)
-end
-
--- 1. Chạy Script Farm Gốc (Loadstring)
-spawn(function()
-    print("[FARM BELI] Đang tải script farm gốc...")
-    local retries = 0
-    local success = false
-    local err = nil
-    
-    while retries < 3 and not success do
-        success, err = pcall(function()
-            loadstring(game:HttpGet("https://raw.githubusercontent.com/trongdeptraihucscript/Main/refs/heads/main/TN-Tp-Chest.lua"))()
-        end)
-        if not success then
-            retries = retries + 1
-            print("[ERROR] Thử lại lần " .. retries .. ": " .. tostring(err))
+-- 4. Reporting Loop (10s Heartbeat/Beli)
+task.spawn(function()
+    while task.wait(10) do
+        local cur = GetCurrentBeli()
+        SendHeartbeat(cur)
+        print("[STATUS] Heartbeat sent. Beli: " .. cur)
+        
+        if cur >= TARGET_BELI then
+            SendSignal("ChangeAccount", {beli = cur, target = TARGET_BELI})
             task.wait(5)
         end
     end
-    
-    if not success then
-        print("[ERROR] Lỗi tải script farm sau 3 lần thử: " .. tostring(err))
-        task.wait(10)
-        SendReset("Loadstring Error: " .. tostring(err), "lua_err")
-    end
 end)
 
--- 1.1 Nếu 90s không tăng Beli thì hop server ít người
+-- 5. Kick Monitoring
 task.spawn(function()
-    -- [NEW] Đợi 60s đầu tiên để game load hoàn toàn dữ liệu và ổn định vị trí farm
-    task.wait(60)
-    
-    local lastBeli = 0
-    local lastChange = os.clock()
-    local hopping = false
-    pcall(function()
-        lastBeli = GetCurrentBeli()
-    end)
-    
-    -- Reset lại thời điểm bắt đầu tính toán sau khi hết 60s grace period
-    lastChange = os.clock()
-
-    while task.wait(1) do
-        if hopping then
+    while task.wait(2) do
+        local kicked, code, reason = isKicked()
+        if kicked then
+            SendReset(reason, code)
             task.wait(10)
         end
+    end
+end)
 
-        if notifyKick() then
-            continue
-        end
-
-        local cur = 0
-        local ok = pcall(function()
-            cur = GetCurrentBeli()
+-- 6. Start Farm Script (Tùy chọn cho autook.py có thể xử lý qua tín hiệu)
+task.spawn(function()
+    print("[FARM BELI] Đang tải script farm gốc...")
+    local retries = 0
+    while retries < 3 do
+        local success, err = pcall(function()
+            loadstring(game:HttpGet("https://raw.githubusercontent.com/trongdeptraihucscript/Main/refs/heads/main/TN-Tp-Chest.lua"))()
         end)
-        if ok then
-            if cur ~= lastBeli then
-                lastBeli = cur
-                lastChange = os.clock()
-            else
-                -- Tăng lên 90s để phù hợp với tốc độ farm chest (tránh hop quá sớm)
-                if os.clock() - lastChange >= 90 then
-                    hopping = true
-                    print("[FARM BELI] 90s không tăng Beli -> Hop server ít người...")
-                    pcall(function()
-                        SendSignal("HopLowUser", {beli = cur})
-                    end)
-                    task.wait(0.5)
-                    smartHopLowUser()
-                    task.wait(15) -- Đợi teleport
-                    lastChange = os.clock()
-                    hopping = false
-                end
-            end
-        end
+        if success then break end
+        retries = retries + 1
+        print("[ERROR] Thử lại tải script (" .. retries .. "/3): " .. tostring(err))
+        task.wait(5)
     end
 end)
 
--- 2. Vòng lặp kiểm tra tiền & Kick Status
-spawn(function()
-    local TARGET_BELI = tonumber(_G.TargetBeli) or 2000000
-    local lastTargetSignal = 0
-    while task.wait(5) do
-        if notifyKick() then
-            task.wait(5) -- Đợi Python xử lý
-        else
-            local current = GetCurrentBeli()
-            print("[FARM BELI] Hiện tại: " .. current)
-            
-            if current >= TARGET_BELI then
-                if os.clock() - lastTargetSignal >= 12 then
-                    lastTargetSignal = os.clock()
-                    SendSignal("ChangeAccount", {beli = current, target = TARGET_BELI})
-                    task.wait(3)
-                end
-            end
-
-            SendHeartbeat({beli = current})
-        end
-    end
-end)
+-- Lựa chọn autook.py (Tín hiệu thông báo cho Python biết đã sẵn sàng)
+SendSignal("ScriptReady", {mode = "AutoOK"})
