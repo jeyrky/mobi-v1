@@ -12,6 +12,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local VirtualUser = game:GetService("VirtualUser")
 local TeleportService = game:GetService("TeleportService")
+local GuiService = game:GetService("GuiService")
 
 local PORT = 8000
 local BASES = {
@@ -124,6 +125,19 @@ LocalPlayer.Idled:Connect(function()
 end)
 
 local function isKicked()
+    local function getGuiError()
+        local msg = ""
+        local ok = pcall(function()
+            msg = GuiService.ErrorMessage
+        end)
+        if ok and msg and #tostring(msg) > 0 then
+            local s = tostring(msg)
+            local code = string.match(s, "(%d%d%d)")
+            return s, code
+        end
+        return "", nil
+    end
+
     local function collectText(root)
         if not root then return "", nil end
         local out = {}
@@ -149,6 +163,18 @@ local function isKicked()
         if not game.Players.LocalPlayer or not game.Players.LocalPlayer.Parent then
             return true, "offline", "player_nil"
         end
+
+        local emsg, ecode = getGuiError()
+        if emsg and #emsg > 0 then
+            local t0 = string.lower(emsg)
+            local kws0 = {"disconnected","disconnect","kicked","kick","security kick","banned","not authorized","maintenance","internet","connection","same account","please rejoin","error code","mất kết nối","mã lỗi","bảo trì","kết nối lại","reconnect","restricted","277","267","268","773"}
+            for _, k in ipairs(kws0) do
+                if string.find(t0, k, 1, true) then
+                    return true, ecode, string.sub(emsg, 1, 300)
+                end
+            end
+        end
+
         local coreGui = game:GetService("CoreGui")
         local promptGui = coreGui:FindFirstChild("RobloxPromptGui")
         local text1, code1 = collectText(promptGui)
@@ -158,7 +184,7 @@ local function isKicked()
         local text = (text1 or "") .. " " .. (text2 or "")
         local codeFound = code1 or code2
         local t = string.lower(text or "")
-        local kws = {"disconnected","disconnect","kicked","kick","security kick","banned","not authorized","maintenance","internet","connection","same account","please rejoin","error code","mất kết nối","mã lỗi","bảo trì","kết nối lại","reconnect","restricted","277","267","268"}
+        local kws = {"disconnected","disconnect","kicked","kick","security kick","banned","not authorized","maintenance","internet","connection","same account","please rejoin","error code","mất kết nối","mã lỗi","bảo trì","kết nối lại","reconnect","restricted","bị kick","bị kích","bị đuổi","bị đá","vui lòng tham gia lại","tham gia lại","277","267","268","773"}
         for _, k in ipairs(kws) do
             if string.find(t, k, 1, true) then
                 return true, codeFound, string.sub(text or "", 1, 300)
@@ -287,6 +313,13 @@ task.spawn(function()
     end
     hook(cg)
     hook(pg)
+end)
+
+pcall(function()
+    GuiService.ErrorMessageChanged:Connect(function()
+        task.wait(0.1)
+        notifyKick()
+    end)
 end)
 
 local function SendHeartbeat(extraData)
