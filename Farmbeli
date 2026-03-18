@@ -142,15 +142,33 @@ local function isKicked()
         if not root then return "", nil end
         local out = {}
         local code = nil
+        -- Chỉ quét tối đa 50 descendants để tránh lag và chỉ quét TextLabel/TextButton có liên quan đến thông báo lỗi
+        local count = 0
         for _, d in ipairs(root:GetDescendants()) do
-            if d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox") then
+            count = count + 1
+            if count > 100 then break end
+            
+            if d:IsA("TextLabel") or d:IsA("TextButton") then
                 local t = d.Text
                 if t and #t > 0 then
-                    table.insert(out, t)
-                    if not code then
-                        local c = string.match(t, "[Ee]rror%s*[Cc]ode%s*:?%s*(%d%d%d)")
-                        if c then
-                            code = c
+                    -- Kiểm tra xem TextLabel này có nằm trong một khung thông báo (Prompt) không
+                    local isPrompt = false
+                    local p = d.Parent
+                    while p and p ~= root do
+                        if string.find(string.lower(p.Name), "prompt") or string.find(string.lower(p.Name), "error") or string.find(string.lower(p.Name), "message") then
+                            isPrompt = true
+                            break
+                        end
+                        p = p.Parent
+                    end
+
+                    if isPrompt or root.Name == "RobloxPromptGui" then
+                        table.insert(out, t)
+                        if not code then
+                            local c = string.match(t, "[Ee]rror%s*[Cc]ode%s*:?%s*(%d%d%d)")
+                            if c then
+                                code = c
+                            end
                         end
                     end
                 end
@@ -160,6 +178,11 @@ local function isKicked()
     end
 
     local ok, kicked, code, snippet = pcall(function()
+        -- Không check khi mới vào game dưới 10 giây để tránh nhận diện nhầm UI đang load
+        if os.clock() < 10 then
+            return false
+        end
+
         if not game.Players.LocalPlayer or not game.Players.LocalPlayer.Parent then
             return true, "offline", "player_nil"
         end
@@ -167,11 +190,12 @@ local function isKicked()
         local emsg, ecode = getGuiError()
         if emsg and #emsg > 0 then
             local t0 = string.lower(emsg)
+            -- Các từ khóa lỗi nghiêm trọng từ Roblox (GuiService)
             local kws0 = {
-                "disconnected", "disconnect", "kicked", "kick", "security kick", "banned", "not authorized", 
-                "maintenance", "internet", "connection", "same account", "please rejoin", "error code", 
-                "mất kết nối", "mã lỗi", "bảo trì", "kết nối lại", "reconnect", "restricted", "unexpected",
-                "client behavior", "teleport", "failed", "crash", "out of memory", "experience",
+                "disconnected", "kicked", "security kick", "banned", "not authorized", 
+                "maintenance", "same account", "error code", 
+                "mất kết nối", "mã lỗi", "bảo trì", "kết nối lại", "restricted", "unexpected",
+                "client behavior", "out of memory",
                 "277", "267", "268", "773", "279", "610", "524", "529", "273"
             }
             for _, k in ipairs(kws0) do
@@ -184,22 +208,45 @@ local function isKicked()
         local coreGui = game:GetService("CoreGui")
         local promptGui = coreGui:FindFirstChild("RobloxPromptGui")
         local text1, code1 = collectText(promptGui)
-        local pg = Players.LocalPlayer and Players.LocalPlayer:FindFirstChild("PlayerGui")
-        local text2, code2 = collectText(pg)
+        
+        -- Chỉ quét PlayerGui nếu thực sự có thông báo lỗi hiện lên
+        local text2, code2 = "", nil
+        local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
+        if pg then
+            -- Chỉ quét các UI có tên chứa 'Error', 'Prompt', 'Disconnect' trong PlayerGui
+            for _, v in ipairs(pg:GetChildren()) do
+                local name = string.lower(v.Name)
+                if string.find(name, "error") or string.find(name, "prompt") or string.find(name, "disconnect") or string.find(name, "kick") then
+                    local t, c = collectText(v)
+                    if t and #t > 0 then
+                        text2 = text2 .. " " .. t
+                        code2 = code2 or c
+                    end
+                end
+            end
+        end
 
         local text = (text1 or "") .. " " .. (text2 or "")
         local codeFound = code1 or code2
         local t = string.lower(text or "")
+        
+        -- Các từ khóa lỗi nghiêm trọng từ UI
         local kws = {
-            "disconnected", "disconnect", "kicked", "kick", "security kick", "banned", "not authorized", 
-            "maintenance", "internet", "connection", "same account", "please rejoin", "error code", 
-            "mất kết nối", "mã lỗi", "bảo trì", "kết nối lại", "reconnect", "restricted", "bị kick", 
-            "bị kích", "bị đuổi", "bị đá", "vui lòng tham gia lại", "tham gia lại", "không thể kết nối",
-            "mất mạng", "lỗi", "văng game", "unexpected", "client behavior", "teleport", "failed",
+            "disconnected", "kicked", "security kick", "banned", "not authorized", 
+            "maintenance", "same account", "error code", 
+            "mất kết nối", "mã lỗi", "bảo trì", "kết nối lại", "restricted", "bị kick", 
+            "bị kích", "bị đuổi", "bị đá", "vui lòng tham gia lại", "không thể kết nối",
+            "mất mạng", "văng game", "unexpected client behavior",
             "277", "267", "268", "773", "279", "610", "524", "529", "273"
         }
+        
         for _, k in ipairs(kws) do
             if string.find(t, k, 1, true) then
+                -- Kiểm tra thêm để tránh nhận diện nhầm nút "Teleport" hoặc "Failed" thông thường
+                -- Nếu là "Teleport" mà không có "Failed" đi kèm thì bỏ qua
+                if k == "teleport" and not string.find(t, "failed") then
+                    continue
+                end
                 return true, codeFound, string.sub(text or "", 1, 300)
             end
         end
@@ -367,7 +414,8 @@ local function notifyKick()
     
     -- Check thêm lỗi Teleport bị kẹt
     if not kicked then
-        if TELEPORT_FAIL_TS > 0 and os.clock() - TELEPORT_FAIL_TS < 10 then
+        -- Tăng thời gian check lên 15s và chỉ check khi đã vào game đủ lâu (>20s)
+        if os.clock() > 20 and TELEPORT_FAIL_TS > 0 and os.clock() - TELEPORT_FAIL_TS < 15 then
             kicked = true
             code = tostring(TELEPORT_FAIL_RESULT)
             snippet = "Teleport Failed: " .. tostring(TELEPORT_FAIL_MSG)
@@ -379,7 +427,8 @@ local function notifyKick()
     end
     
     local now = os.clock()
-    if now - LAST_KICK_SENT >= 8 then
+    -- Giãn cách gửi tín hiệu Reset ít nhất 15 giây để tránh spam reset loop
+    if now - LAST_KICK_SENT >= 15 then
         LAST_KICK_SENT = now
         pcall(function()
             SendReset(snippet, code)
@@ -396,18 +445,20 @@ end)
 
 task.spawn(function()
     local cg = game:GetService("CoreGui")
-    local pg = Players.LocalPlayer and Players.LocalPlayer:FindFirstChild("PlayerGui")
+    -- Chỉ hook CoreGui vì lỗi Roblox thường hiện ở đây. PlayerGui quét định kỳ là đủ.
     local function hook(container)
         if not container then return end
         pcall(function()
             container.DescendantAdded:Connect(function()
-                task.wait(0.2)
-                notifyKick()
+                -- Giới hạn tần suất check từ sự kiện
+                if os.clock() - LAST_KICK_SENT > 5 then
+                    task.wait(0.5)
+                    notifyKick()
+                end
             end)
         end)
     end
     hook(cg)
-    hook(pg)
 end)
 
 pcall(function()
@@ -671,12 +722,24 @@ end
 -- 1. Chạy Script Farm Gốc (Loadstring)
 spawn(function()
     print("[FARM BELI] Đang tải script farm gốc...")
-    local success, err = pcall(function()
-        loadstring(game:HttpGet("https://raw.githubusercontent.com/trongdeptraihucscript/Main/refs/heads/main/TN-Tp-Chest.lua"))()
-    end)
+    local retries = 0
+    local success = false
+    local err = nil
+    
+    while retries < 3 and not success do
+        success, err = pcall(function()
+            loadstring(game:HttpGet("https://raw.githubusercontent.com/trongdeptraihucscript/Main/refs/heads/main/TN-Tp-Chest.lua"))()
+        end)
+        if not success then
+            retries = retries + 1
+            print("[ERROR] Thử lại lần " .. retries .. ": " .. tostring(err))
+            task.wait(5)
+        end
+    end
+    
     if not success then
-        print("[ERROR] Lỗi tải script farm: " .. tostring(err))
-        task.wait(2)
+        print("[ERROR] Lỗi tải script farm sau 3 lần thử: " .. tostring(err))
+        task.wait(10)
         SendReset("Loadstring Error: " .. tostring(err), "lua_err")
     end
 end)
