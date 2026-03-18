@@ -309,9 +309,7 @@ function GetCurrentBeli()
 end
 
 task.spawn(function()
-    print("[FARM BELI] Grace period 60s bắt đầu (Không tính tiền thời gian này)...")
-    task.wait(60) -- Grace period 60s đầu tiên
-    print("[FARM BELI] Hết 60s grace period. Bắt đầu theo dõi Beli (10s check)...")
+    print("[FARM BELI] Bắt đầu theo dõi Beli ngay lập tức (10s check)...")
     
     LAST_BELI_VALUE = GetCurrentBeli()
     LAST_BELI_CHANGE = os.clock()
@@ -472,7 +470,7 @@ local function startCleanUI()
         idleLabel.TextColor3 = Color3.new(1, 0.5, 0.5) -- Màu đỏ nhạt cho cảnh báo Idle
         idleLabel.TextSize = 16
         idleLabel.Font = Enum.Font.GothamBold
-        idleLabel.Text = "Status: Wait (60s)..."
+        idleLabel.Text = "Status: Farming..."
         idleLabel.Parent = mainFrame
 
         local hopStatus = Instance.new("TextLabel")
