@@ -315,17 +315,17 @@ task.spawn(function()
             end
         end)
 
-        -- [BẮT BUỘC] Nếu đã đủ 20 giây -> HOP NGAY (Dù cur có lớn hơn LAST_BELI_VALUE hay không)
-        if idleTime >= 20 then
-            print("[FARM BELI] Chốt mốc 20s không tăng Beli. Thực hiện Hop Server ngay lập tức!")
-            SendSignal("HopLowUser", {beli = cur, reason = "20s_no_beli_increase_locked"})
+        -- [BẮT BUỘC] Nếu đã đủ 10 giây -> HOP NGAY (Dù cur có lớn hơn LAST_BELI_VALUE hay không)
+        if idleTime >= 10 then
+            print("[FARM BELI] Chốt mốc 10s không tăng Beli. Thực hiện Hop Server ngay lập tức!")
+            SendSignal("HopLowUser", {beli = cur, reason = "10s_no_beli_increase_locked"})
             smartHopLowUser()
             -- Reset mốc thời gian sau khi gọi Hop để tránh spam lệnh trong khi đang đợi teleport
             LAST_BELI_CHANGE = os.clock()
         end
 
         -- Cập nhật giá trị Beli cuối cùng và mốc thời gian (Chỉ khi chưa bị trigger hop)
-        if cur > LAST_BELI_VALUE and idleTime < 20 then
+        if cur > LAST_BELI_VALUE and idleTime < 10 then
             LAST_BELI_VALUE = cur
             LAST_BELI_CHANGE = os.clock()
         end
