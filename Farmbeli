@@ -1,546 +1,2749 @@
--- [JK93S] Auto Farm Beli & Signal to Python (V3)
--- Updated: 20s No Beli -> Hop < 5 Players | 10s Heartbeat/Beli | Kick -> Reset Roblox
--- Script gốc: https://raw.githubusercontent.com/trongdeptraihucscript/Main/refs/heads/main/TN-Tp-Chest.lua
+import os
+import sys
+import subprocess
+import time
+import json
+import sqlite3
+import shutil
+import random
+import warnings
+import select
+import urllib.request
+import urllib.error
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
+from datetime import datetime, timedelta
 
-if not game:IsLoaded() then game.Loaded:Wait() end
+# Suppress DeprecationWarning
+warnings.filterwarnings("ignore", category=DeprecationWarning) 
 
--- 1. Cấu hình & Helper gửi tín hiệu
-local HttpService = game:GetService("HttpService")
-local Players = game:GetService("Players")
-local LocalPlayer = Players.LocalPlayer
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
-local VirtualUser = game:GetService("VirtualUser")
-local TeleportService = game:GetService("TeleportService")
-local GuiService = game:GetService("GuiService")
+# Cấu hình mặc định
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# Fallback nếu chạy trong interactive mode
+if not BASE_DIR or BASE_DIR == '.':
+    BASE_DIR = "/sdcard/Download"
 
-local PORT = 8000
-local BASES = {
-    "http://127.0.0.1:" .. tostring(PORT),
-    "http://10.0.2.2:" .. tostring(PORT)
+CONFIG_FILE = os.path.join(BASE_DIR, "config_multi.json")
+COOKIES_TXT_FILE = os.path.join(BASE_DIR, "cookies.txt")
+COOKIES_TEMPLATE = os.path.join(BASE_DIR, "Cookies")
+APPSTORAGE_FILE = os.path.join(BASE_DIR, "appStorage.json")
+if not os.path.exists(APPSTORAGE_FILE) and os.path.exists(os.path.join(BASE_DIR, "AppStorage", "appStorage.json")):
+    APPSTORAGE_FILE = os.path.join(BASE_DIR, "AppStorage", "appStorage.json")
+
+COOKIE_INDEXES = {} # Lưu index cookie hiện tại của mỗi package {pkg: index}
+HEARTBEAT_DATA = {} # {pkg: timestamp}
+OPEN_TS = {} # {pkg: timestamp mở VIP1}
+CURRENT_VIP_INDEX = {} # {pkg: vip index hiện tại}
+RESTART_TS = {} # {pkg: lần restart gần nhất theo chu kỳ offline}
+SWITCH_TS = {} # {pkg: lần đổi acc gần nhất theo chu kỳ offline}
+SERVER_STARTED = False
+LAST_NONCE = {}
+INIT_DONE = False
+STOP_EVT = threading.Event()
+PKG_USERNAMES = {} # {pkg: username}
+HEARTBEAT_INFO = {} # {pkg: {server_type: "VIP1/VIP2/NORMAL"}}
+RANDOM_DONE_TS = {} # {cookie_index: timestamp} - Lưu thời điểm acc random xong
+NEXT_RUN_TS = {} # {pkg: timestamp} - Lưu thời điểm chạy lại tiếp theo (cho option 2)
+OPTION5_ACTIVE = False
+TOTAL_ACCOUNTS_PROCESSED = 0
+OPTION6_ACTIVE = False
+COOKIE_TOTAL = 0
+ACTIVE_RUN_PKGS = []
+NO_LOOP_DONE_PKGS = set()
+
+DEFAULT_CONFIG = {
+    "vip1_url": "",
+    "vip2_url": "",
+    "loop_infinite": True,
+    "delay": 5,
+    "use_vip": True,
+    "use_normal": False,
+    "vip_urls": [], # Internal use
+    "vip_index": 0, # Internal use
+    "normal_place_id": 2753915549,
+    "target_beli": 1000000 # [NEW] Cấu hình mặc định cho Farm Beli
 }
 
-local START_TIME = os.clock()
-local LAST_BELI_CHANGE = os.clock()
-local LAST_BELI_VALUE = 0
-local HOPPING = false
-
-local function readPkgName()
-    local pkg = nil
-    pcall(function()
-        if isfile and isfile("appStorage.json") then
-            local content = readfile("appStorage.json")
-            if content and #content > 0 then
-                local js = HttpService:JSONDecode(content)
-                if js and js.PkgName then
-                    pkg = js.PkgName
-                end
-            end
-        end
-    end)
-    return pkg
-end
-
-local function getUsername()
-    local uname = "Unknown"
-    pcall(function()
-        if Players.LocalPlayer then
-            uname = Players.LocalPlayer.Name
-        end
-    end)
-    return uname
-end
-
-local function writeAppStorage(fields)
-    pcall(function()
-        if not writefile then return end
-        local js = {}
-        if isfile and isfile("appStorage.json") then
-            local content = readfile("appStorage.json")
-            if content and #content > 0 then
-                local ok, decoded = pcall(HttpService.JSONDecode, HttpService, content)
-                if ok and type(decoded) == "table" then js = decoded end
-            end
-        end
-        for k, v in pairs(fields) do js[k] = v end
-        writefile("appStorage.json", HttpService:JSONEncode(js))
-        pcall(function() writefile("../appStorage.json", HttpService:JSONEncode(js)) end)
-    end)
-end
-
-local function urlEncode(str)
-    if str == nil then return "" end
-    str = tostring(str)
-    str = string.gsub(str, "\n", "\r\n")
-    str = string.gsub(str, "([^%w%-_%.~])", function(c)
-        return string.format("%%%02X", string.byte(c))
-    end)
-    return str
-end
-
-function SendSignal(signalName, extraData)
-    local pkgName = readPkgName()
-    local uname = getUsername()
-    local nonce = tostring(math.random(100000, 999999))
-    local data = {
-        username = uname,
-        signal = signalName,
-        nonce = nonce
-    }
-    if pkgName and pkgName ~= "" and pkgName ~= "unknown" then data.package = pkgName end
-    if extraData then for k, v in pairs(extraData) do data[k] = v end end
+def resolve_vip_links(cfg):
+    vip1 = cfg.get("vip1_url") or ""
+    vip2 = cfg.get("vip2_url") or ""
     
-    local body = HttpService:JSONEncode(data)
-    local req = (syn and syn.request) or (http and http.request) or http_request or request
-
-    for _, base in ipairs(BASES) do
-        local url = base .. "/signal"
-        pcall(function()
-            if req then
-                req({Url = url, Method = "POST", Headers = {["Content-Type"] = "application/json"}, Body = body})
-            else
-                HttpService:RequestAsync({Url = url, Method = "POST", Headers = {["Content-Type"] = "application/json"}, Body = body})
-            end
-        end)
-    end
-    writeAppStorage({username = uname, Signal = signalName, Nonce = nonce, Heartbeat = os.time(), PkgName = pkgName})
-end
-
-function SendReset(reason, code)
-    local pkgName = readPkgName()
-    local uname = getUsername()
-    local nonce = tostring(math.random(100000, 999999))
-    local data = {
-        username = uname,
-        signal = "Kicked",
-        reason = reason or "Unknown",
-        code = code or "0",
-        nonce = nonce
-    }
-    if pkgName and pkgName ~= "" and pkgName ~= "unknown" then data.package = pkgName end
+    def clean(u):
+        if u and isinstance(u, str):
+            return u.replace('`', '').strip()
+        return ""
     
-    for _, base in ipairs(BASES) do
-        pcall(function()
-            local url = base .. "/reset_game"
-            local req = (syn and syn.request) or (http and http.request) or http_request or request
-            if req then
-                req({Url = url, Method = "POST", Headers = {["Content-Type"] = "application/json"}, Body = HttpService:JSONEncode(data)})
-            else
-                HttpService:RequestAsync({Url = url, Method = "POST", Headers = {["Content-Type"] = "application/json"}, Body = HttpService:JSONEncode(data)})
-            end
-        end)
-    end
-    writeAppStorage({username = uname, Signal = "Kicked", Reason = reason, Code = code, Nonce = nonce, Heartbeat = os.time(), PkgName = pkgName})
-    print("[RESET] Tín hiệu Reset đã được gửi: " .. tostring(reason))
-end
-
-function SendHeartbeat(beliValue)
-    local pkgName = readPkgName()
-    local uname = getUsername()
-    local data = {
-        username = uname,
-        beli = beliValue or 0,
-        server_type = "FARM",
-        Heartbeat = os.time()
-    }
-    if pkgName and pkgName ~= "" and pkgName ~= "unknown" then data.package = pkgName end
+    vip1 = clean(vip1)
+    vip2 = clean(vip2)
     
-    for _, base in ipairs(BASES) do
-        pcall(function()
-            local url = base .. "/heartbeat?username=" .. urlEncode(uname) .. "&beli=" .. urlEncode(data.beli) .. "&server_type=FARM"
-            if pkgName then url = url .. "&package=" .. urlEncode(pkgName) end
-            local req = (syn and syn.request) or (http and http.request) or http_request or request
-            if req then
-                req({Url = url, Method = "GET"})
-            else
-                HttpService:RequestAsync({Url = url, Method = "GET"})
-            end
-        end)
-    end
-    writeAppStorage({username = uname, Heartbeat = os.time(), beli = data.beli, PkgName = pkgName})
-end
+    res = []
+    if vip1:
+        res.append(vip1)
+    if vip2:
+        res.append(vip2)
+    return res
 
---------------------------------------------------------------------------------
--- AUTO CHOOSE TEAM (PIRATES)
---------------------------------------------------------------------------------
-local function autoChooseTeam()
-    local teamName = "Pirates"
-    local commF = ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("CommF_")
-    if commF and commF:IsA("RemoteFunction") then
-        pcall(function() commF:InvokeServer("SetTeam", teamName) end)
-    end
-    task.wait(1)
-    if LocalPlayer.Team == nil then
-        for _, v in ipairs(game:GetService("CoreGui"):GetDescendants()) do
-            if (v:IsA("TextButton") or v:IsA("ImageButton")) and (v.Name:lower():find("pirate") or (v.Text and v.Text:lower():find("pirate"))) then
-                local vim = game:GetService("VirtualInputManager")
-                local pos = v.AbsolutePosition + (v.AbsoluteSize/2)
-                vim:SendMouseButtonEvent(pos.X, pos.Y, 0, true, v, 0)
-                vim:SendMouseButtonEvent(pos.X, pos.Y, 0, false, v, 0)
+def clear_screen():
+    # Fix staircase effect in Termux
+    os.system('stty sane 2>/dev/null')
+    os.system('cls' if os.name == 'nt' else 'clear')
+
+def log_status(msg):
+    """Hiển thị trạng thái theo hàng dọc"""
+    print(msg)
+    sys.stdout.flush()
+
+def start_stop_listener():
+    """Khởi động luồng lắng nghe phím dừng"""
+    try:
+        STOP_EVT.clear()
+        def _listen():
+            try:
+                s = input("\n[STOP] Nhập 9 rồi Enter để dừng tác vụ...\n").strip()
+                if s == "9":
+                    STOP_EVT.set()
+            except Exception:
+                pass
+        t = threading.Thread(target=_listen, daemon=True)
+        t.start()
+    except Exception:
+        pass
+
+def wait_with_enter_check(seconds, msg_prefix):
+    """Đợi seconds giây, nếu ấn Enter thì return True (Dừng)"""
+    try:
+        if os.name != 'nt':
+            while select.select([sys.stdin], [], [], 0.0)[0]:
+                sys.stdin.read(1)
+    except:
+        pass
+
+    for s in range(seconds, 0, -1):
+        log_status(f"{msg_prefix} Đợi {s}s... (Ấn Enter để dừng)")
+        try:
+            if os.name != 'nt':
+                rlist, _, _ = select.select([sys.stdin], [], [], 1.0)
+                if rlist:
+                    sys.stdin.readline()
+                    return True
+            else:
+                time.sleep(1)
+        except:
+            time.sleep(1)
+    return False
+
+def run_cmd(cmd):
+    return subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+ADB_MODE = False
+ADB_DEVICE = None
+
+def get_adb_devices():
+    try:
+        res = subprocess.run("adb devices", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        devices = []
+        for line in res.stdout.splitlines():
+            if line.strip() and "List of devices" not in line and "offline" not in line:
+                parts = line.split()
+                if len(parts) >= 1:
+                    devices.append(parts[0])
+        return devices
+    except:
+        return []
+
+def init_adb():
+    global ADB_MODE, ADB_DEVICE
+    # Ưu tiên su nếu có (Termux)
+    if shutil.which("su"):
+        ADB_MODE = False
+        return
+    
+    # Nếu không có su, thử dùng ADB (Windows)
+    devs = get_adb_devices()
+    if devs:
+        ADB_MODE = True
+        ADB_DEVICE = devs[0]
+        print(f"[INIT] Chạy trên Windows (ADB Mode) -> Kết nối: {ADB_DEVICE}")
+    else:
+        print("[INIT] ADB Mode: Không tìm thấy thiết bị nào!")
+
+def copy_file_to_device(local_path, remote_path):
+    if ADB_MODE and ADB_DEVICE:
+        # Push từ Windows vào Android
+        cmd = f"adb -s {ADB_DEVICE} push \"{local_path}\" \"{remote_path}\""
+        res = run_cmd(cmd)
+        return res.returncode == 0
+    else:
+        # Copy nội bộ trên Android
+        res = run_su(f"cp \"{local_path}\" \"{remote_path}\"")
+        return res.returncode == 0
+
+def inject_autoexec_script(executor_choice, script_mode):
+    """
+    Hàm đẩy script vào thư mục Autoexec của các Executor.
+    Xóa sạch thư mục trước khi đẩy file mới.
+    """
+    url = ""
+    lua_content = ""
+    if script_mode == "1": # Random
+        url = "https://raw.githubusercontent.com/jeyrky/mobi-v1/refs/heads/main/random-s2"
+        print(" -> Đã chọn Script: RANDOM")
+    elif script_mode == "2": # Bounty
+        url = "https://raw.githubusercontent.com/jeyrky/mobi-v1/refs/heads/main/bounty"
+        print(" -> Đã chọn Script: BOUNTY")
+    elif script_mode == "3": # Farm Beli
+        url = "https://raw.githubusercontent.com/jeyrky/mobi-v1/refs/heads/main/Farmbeli"
+        cfg = load_config()
+        target = cfg.get("target_beli", 500000)
+        lua_content = f'_G.TargetBeli = {int(target)}\nloadstring(game:HttpGet("{url}"))()'
+        print(" -> Đã chọn Script: FARM BELI")
+    else:
+        print(" -> Chế độ không hợp lệ, mặc định dùng RANDOM.")
+        url = "https://raw.githubusercontent.com/jeyrky/mobi-v1/refs/heads/main/random-s2"
+
+    if script_mode != "3":
+        lua_content = f'loadstring(game:HttpGet("{url}"))()'
+
+    # 2. Xác định đường dẫn Executor
+    # Mapping tên -> đường dẫn thư mục Autoexec
+    exec_paths = {
+        "1": ("/sdcard/Codex/Autoexec", "Codex"),
+        "2": ("/sdcard/Delta/Autoexecute", "Delta"),
+        "3": ("/sdcard/Hydrogen/Autoexec", "Hydrogen"),
+        "4": ("/sdcard/Fluxus/Autoexec", "Fluxus"),
+        "5": ("/sdcard/spdm/Autoexec", "Arceus X"),
+        "6": ("/sdcard/VegaX/Autoexec", "Vega X")
+    }
+
+    if executor_choice not in exec_paths:
+        print(" -> Executor không hợp lệ! Bỏ qua bước nạp script.")
+        return
+
+    target_dir, exec_name = exec_paths[executor_choice]
+    print(f" -> Đang xử lý cho {exec_name} tại: {target_dir}")
+
+    # 3. Xóa sạch thư mục cũ (Dùng quyền Root)
+    print(" -> Đang dọn dẹp thư mục cũ...")
+    # Lệnh rm -rf trên Android/Linux
+    run_su(f"rm -rf \"{target_dir}\"/*")
+    
+    # Đảm bảo thư mục tồn tại (nếu lỡ xóa cả thư mục cha hoặc chưa có)
+    run_su(f"mkdir -p \"{target_dir}\"")
+
+    # 4. Tạo file script mới
+    # Tạo file tạm trên máy tính (nếu chạy ADB Mode) hoặc trên Android
+    local_temp = "mobi_loader.txt"
+    try:
+        with open(local_temp, "w", encoding="utf-8") as f:
+            f.write(lua_content)
+        
+        remote_file = f"{target_dir}/mobi_loader.txt"
+        print(f" -> Đang đẩy script vào: {remote_file}")
+        
+        if copy_file_to_device(os.path.abspath(local_temp), remote_file):
+            print(" -> [OK] Đã nạp script thành công!")
+            # Cấp quyền 777 cho chắc chắn
+            run_su(f"chmod 777 \"{remote_file}\"")
+        else:
+            print(" -> [FAIL] Lỗi khi copy file script.")
+            
+    except Exception as e:
+        print(f" -> [ERROR] Lỗi tạo file script: {e}")
+    finally:
+        # Dọn file tạm trên Windows nếu có
+        if os.path.exists(local_temp):
+            os.remove(local_temp)
+
+
+SU_LOCK = threading.Lock()
+ROOT_SHELL = None
+
+class PersistentSu:
+    def __init__(self):
+        self.process = subprocess.Popen(
+            ["su"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, # Merge stderr
+            text=True,
+            bufsize=1
+        )
+
+    def run(self, cmd):
+        token = f"__EOF_{random.randint(10000,99999)}__"
+        full_cmd = f"{cmd}; echo $?; echo {token}\n"
+        
+        try:
+            self.process.stdin.write(full_cmd)
+            self.process.stdin.flush()
+        except (BrokenPipeError, OSError):
+            self.__init__()
+            self.process.stdin.write(full_cmd)
+            self.process.stdin.flush()
+            
+        output_lines = []
+        return_code = 1
+        
+        while True:
+            line = self.process.stdout.readline()
+            if not line:
                 break
-            end
-        end
-    end
-end
-
---------------------------------------------------------------------------------
--- KICK DETECTION (cùng logic Code random: RobloxPromptGui + keyword + Visible)
---------------------------------------------------------------------------------
-local function isKicked()
-    local ok, kicked, code, snippet = pcall(function()
-        if not game.Players.LocalPlayer or not game.Players.LocalPlayer.Parent then
-            return true, "player_nil", "offline"
-        end
-
-        local emsg = GuiService.ErrorMessage
-        if emsg and #emsg > 0 then
-            local t0 = string.lower(emsg)
-            local kws0 = {"disconnected", "kicked", "security kick", "banned", "maintenance", "same account", "error code", "mất kết nối", "mã lỗi", "bảo trì", "restricted", "unexpected", "client behavior", "out of memory"}
-            for _, k in ipairs(kws0) do if string.find(t0, k, 1, true) then return true, "gui_err", emsg end end
-        end
-
-        local coreGui = game:GetService("CoreGui")
-        local promptGui = coreGui:FindFirstChild("RobloxPromptGui")
-        if not promptGui then return false end
-
-        local kws = {
-            "kick", "disconnect", "security", "banned",
-            "mất kết nối", "mã lỗi", "error code",
-            "please rejoin", "not authorized", "maintenance",
-            "bảo trì", "internet", "connection",
-            "same account", "launch", "idle",
-            "chặn", "restricted", "đóng", "close",
-            "rời khỏi", "leave", "kết nối lại", "reconnect",
-            "277", "267", "268",
-            "disconnected", "security kick", "bị kick", "vui lòng tham gia lại",
-            "không thể kết nối", "mất mạng", "văng game", "unexpected client behavior"
-        }
-        for _, d in ipairs(promptGui:GetDescendants()) do
-            if (d:IsA("TextLabel") or d:IsA("TextButton")) and d.Visible then
-                local t = string.lower(d.Text or "")
-                for _, k in ipairs(kws) do
-                    if string.find(t, k) then return true, "prompt_err", d.Text end
-                end
-            end
-        end
-        return false
-    end)
-    if ok then return kicked == true, code, snippet end
-    return false
-end
-
---------------------------------------------------------------------------------
--- SMART HOP (TARGET < 5 PLAYERS)
---------------------------------------------------------------------------------
-local function smartHopLowUser()
-    if HOPPING then return end
-    HOPPING = true
-    print("[FARM BELI] Đang tìm server mới (< 5 người)...")
-    
-    local function scan()
-        local req = (syn and syn.request) or (http and http.request) or http_request or request
-        if not req then 
-            print("[WARN] Executor không hỗ trợ HTTP Request, chuyển sang Hop mặc định...")
-            return nil 
-        end
-        
-        -- Thêm cache buster để lấy dữ liệu server mới nhất
-        local url = "https://games.roblox.com/v1/games/" .. tostring(game.PlaceId) .. "/servers/Public?sortOrder=Asc&limit=100&_t=" .. tostring(os.time())
-        local ok, res = pcall(function() return req({Url = url, Method = "GET"}) end)
-        
-        if ok and res and res.Body then
-            local data = HttpService:JSONDecode(res.Body)
-            if data and data.data then
-                local candidates = {}
-                for _, s in ipairs(data.data) do
-                    -- Chỉ lấy server khác JobId hiện tại và có dưới 5 người
-                    if s.id and s.id ~= game.JobId and (s.playing or 0) < 5 then
-                        table.insert(candidates, s.id)
-                    end
-                end
-                if #candidates > 0 then 
-                    return candidates[math.random(1, #candidates)] 
-                end
-            end
-        end
-        return nil
-    end
-
-    local serverId = scan()
-    pcall(function()
-        if serverId then
-            print("[FARM BELI] Chuyển đến server: " .. tostring(serverId))
-            TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId, LocalPlayer)
-        else
-            -- Nếu không tìm được server < 5 người, hop đại sang server khác
-            print("[FARM BELI] Không tìm thấy server < 5 người, hop ngẫu nhiên...")
-            TeleportService:Teleport(game.PlaceId, LocalPlayer)
-        end
-    end)
-    
-    -- Sau 10s nếu vẫn chưa teleport được thì cho phép gọi lệnh hop tiếp theo
-    task.delay(10, function()
-        HOPPING = false
-    end)
-end
-
---------------------------------------------------------------------------------
--- MAIN LOOPS
---------------------------------------------------------------------------------
-
--- 1. Auto Choose Team
-task.spawn(function()
-    while LocalPlayer.Team == nil and os.clock() - START_TIME < 30 do
-        autoChooseTeam()
-        task.wait(1)
-    end
-end)
-
--- 2. Anti AFK
-LocalPlayer.Idled:Connect(function()
-    pcall(function()
-        VirtualUser:Button2Down(Vector2.new(0,0), workspace.CurrentCamera and workspace.CurrentCamera.CFrame or CFrame.new())
-        task.wait(1)
-        VirtualUser:Button2Up(Vector2.new(0,0), workspace.CurrentCamera and workspace.CurrentCamera.CFrame or CFrame.new())
-    end)
-end)
-
--- 3. Beli Monitoring (10s No Increase -> Hop < 5 Players)
-local function comma_value(n)
-    local left, num, right = string.match(n, '^([^%d]*%d)(%d*)(.-)$')
-    return left .. (num:reverse():gsub('(%d%d%d)', '%1,'):reverse()) .. right
-end
-
-function GetCurrentBeli()
-    local data = LocalPlayer:FindFirstChild("Data")
-    if data and data:FindFirstChild("Beli") then return data.Beli.Value end
-    local stats = LocalPlayer:FindFirstChild("leaderstats")
-    if stats and stats:FindFirstChild("Beli") then return stats.Beli.Value end
-    for _, v in ipairs(LocalPlayer:GetDescendants()) do
-        if v.Name == "Beli" and (v:IsA("IntValue") or v:IsA("NumberValue")) then return v.Value end
-    end
-    return 0
-end
-
-task.spawn(function()
-    print("[FARM BELI] Bắt đầu theo dõi Beli ngay lập tức (10s check)...")
-    
-    LAST_BELI_VALUE = GetCurrentBeli()
-    LAST_BELI_CHANGE = os.clock()
-    
-    while task.wait(1) do
-        local cur = GetCurrentBeli()
-        local idleTime = os.clock() - LAST_BELI_CHANGE
-        
-        -- Cập nhật số giây không tăng tiền lên UI (nếu có)
-        pcall(function()
-            local ui = game:GetService("CoreGui"):FindFirstChild("JK93S_BeliUI") or LocalPlayer.PlayerGui:FindFirstChild("JK93S_BeliUI")
-            if ui and ui:FindFirstChild("MainFrame") then
-                local main = ui.MainFrame
-                if main:FindFirstChild("IdleLabel") then
-                    if idleTime > 0 then
-                        main.IdleLabel.Text = "Idle: " .. math.floor(idleTime) .. "s / 10s"
-                    else
-                        main.IdleLabel.Text = "Status: Farming..."
-                    end
-                end
-                if main:FindFirstChild("HopStatus") then
-                    if HOPPING then
-                        main.HopStatus.Text = "Attempting Server Hop..."
-                    else
-                        main.HopStatus.Text = ""
-                    end
-                end
-            end
-        end)
-
-        -- [BẮT BUỘC] Nếu đã đủ 10 giây -> HOP NGAY
-        if idleTime >= 10 then
-            print("[FARM BELI] Chốt mốc 10s không tăng Beli. Thực hiện Hop Server ngay lập tức!")
-            SendSignal("HopLowUser", {beli = cur, reason = "10s_no_beli_increase_locked"})
-            smartHopLowUser()
-            -- Reset mốc thời gian để tránh spam lệnh trong khi đang đợi teleport
-            LAST_BELI_CHANGE = os.clock()
-        end
-
-        -- Cập nhật giá trị Beli cuối cùng và mốc thời gian (Chỉ khi chưa bị trigger hop)
-        if cur > LAST_BELI_VALUE and idleTime < 10 then
-            LAST_BELI_VALUE = cur
-            LAST_BELI_CHANGE = os.clock()
-        end
-    end
-end)
-
--- 4. Reporting Loop (10s Heartbeat/Beli)
-task.spawn(function()
-    while task.wait(10) do
-        local cur = GetCurrentBeli()
-        SendHeartbeat(cur)
-        print("[STATUS] Heartbeat sent. Beli: " .. cur)
-        -- Việc đổi nick hoàn toàn do Python tự quyết định dựa trên số Beli nhận được từ Heartbeat
-    end
-end)
-
--- 5. Kick Monitoring — báo Python qua /signal giống Code random (Kicked + HeartbeatKicked)
-task.spawn(function()
-    local KICK_SIGNAL_SENT = false
-    local lastHeartbeatKicked = 0
-    while task.wait(2) do
-        local kicked, code, reason = isKicked()
-        if kicked then
-            if not KICK_SIGNAL_SENT then
-                KICK_SIGNAL_SENT = true
-                SendSignal("Kicked", {reason = tostring(reason or ""), code = tostring(code or "")})
-                print("[KICK] Đã gửi tín hiệu Kicked → Python (/signal)")
-            end
-            if os.clock() - lastHeartbeatKicked >= 20 then
-                lastHeartbeatKicked = os.clock()
-                SendSignal("HeartbeatKicked")
-            end
-            SendReset(reason, code)
-            task.wait(10)
-        else
-            KICK_SIGNAL_SENT = false
-            lastHeartbeatKicked = 0
-        end
-    end
-end)
-
--- 6. Start Farm Script (Tùy chọn cho autook.py có thể xử lý qua tín hiệu)
-task.spawn(function()
-    print("[FARM BELI] Đang tải script farm gốc...")
-    local retries = 0
-    while retries < 3 do
-        local success, err = pcall(function()
-            loadstring(game:HttpGet("https://raw.githubusercontent.com/trongdeptraihucscript/Main/refs/heads/main/TN-Tp-Chest.lua"))()
-        end)
-        if success then break end
-        retries = retries + 1
-        print("[ERROR] Thử lại tải script (" .. retries .. "/3): " .. tostring(err))
-        task.wait(5)
-    end
-end)
-
--- 7. CLEAN UI MODE (Ẩn hết UI trừ số Beli)
-local function startCleanUI()
-    pcall(function()
-        -- 1. Ẩn CoreGui của Roblox (Chat, Leaderboard, Backpack, etc.)
-        game:GetService("StarterGui"):SetCoreGuiEnabled(Enum.CoreGuiType.All, false)
-        
-        -- 2. Ẩn toàn bộ ScreenGui trong PlayerGui của Game
-        local pg = LocalPlayer:WaitForChild("PlayerGui")
-        local function hideGui(v)
-            if v:IsA("ScreenGui") and v.Name ~= "JK93S_BeliUI" then
-                v.Enabled = false
-            end
-        end
-        for _, v in ipairs(pg:GetChildren()) do hideGui(v) end
-        pg.ChildAdded:Connect(hideGui)
-
-        -- 3. Tạo UI siêu gọn chỉ hiện Beli
-        local screenGui = Instance.new("ScreenGui")
-        screenGui.Name = "JK93S_BeliUI"
-        screenGui.ResetOnSpawn = false
-        screenGui.DisplayOrder = 999
-        
-        -- Thử chèn vào CoreGui để không bị game xóa, nếu không được thì vào PlayerGui
-        local uiParent = game:GetService("CoreGui"):FindFirstChild("RobloxGui") or pg
-        screenGui.Parent = uiParent
-
-        local mainFrame = Instance.new("Frame")
-        mainFrame.Name = "MainFrame"
-        mainFrame.Size = UDim2.new(0, 300, 0, 130) -- Tăng chiều cao để thêm dòng Idle
-        mainFrame.Position = UDim2.new(0.5, -150, 0, 50)
-        mainFrame.BackgroundColor3 = Color3.new(0, 0, 0)
-        mainFrame.BackgroundTransparency = 0.5
-        mainFrame.BorderSizePixel = 0
-        mainFrame.Parent = screenGui
-        
-        local corner = Instance.new("UICorner")
-        corner.CornerRadius = UDim.new(0, 10)
-        corner.Parent = mainFrame
-
-        local userLabel = Instance.new("TextLabel")
-        userLabel.Size = UDim2.new(1, 0, 0.2, 0)
-        userLabel.Position = UDim2.new(0, 0, 0, 5)
-        userLabel.BackgroundTransparency = 1
-        userLabel.TextColor3 = Color3.new(1, 1, 1)
-        userLabel.TextSize = 14
-        userLabel.Font = Enum.Font.Gotham
-        userLabel.Text = "User: " .. getUsername()
-        userLabel.Parent = mainFrame
-
-        local beliLabel = Instance.new("TextLabel")
-        beliLabel.Size = UDim2.new(1, 0, 0.3, 0)
-        beliLabel.Position = UDim2.new(0, 0, 0.2, 5)
-        beliLabel.BackgroundTransparency = 1
-        beliLabel.TextColor3 = Color3.new(1, 1, 0)
-        beliLabel.TextSize = 24
-        beliLabel.Font = Enum.Font.GothamBold
-        beliLabel.Text = "Beli: 0"
-        beliLabel.Parent = mainFrame
-
-        local addLabel = Instance.new("TextLabel")
-        addLabel.Size = UDim2.new(1, 0, 0.2, 0)
-        addLabel.Position = UDim2.new(0, 0, 0.5, 5)
-        addLabel.BackgroundTransparency = 1
-        addLabel.TextColor3 = Color3.new(0, 1, 0)
-        addLabel.TextSize = 16
-        addLabel.Font = Enum.Font.Gotham
-        addLabel.Text = ""
-        addLabel.Parent = mainFrame
-
-        local idleLabel = Instance.new("TextLabel")
-        idleLabel.Name = "IdleLabel"
-        idleLabel.Size = UDim2.new(1, 0, 0.2, 0)
-        idleLabel.Position = UDim2.new(0, 0, 0.7, 5)
-        idleLabel.BackgroundTransparency = 1
-        idleLabel.TextColor3 = Color3.new(1, 0.5, 0.5) -- Màu đỏ nhạt cho cảnh báo Idle
-        idleLabel.TextSize = 16
-        idleLabel.Font = Enum.Font.GothamBold
-        idleLabel.Text = "Status: Farming..."
-        idleLabel.Parent = mainFrame
-
-        local hopStatus = Instance.new("TextLabel")
-        hopStatus.Name = "HopStatus"
-        hopStatus.Size = UDim2.new(1, 0, 0.15, 0)
-        hopStatus.Position = UDim2.new(0, 0, 0.85, 5)
-        hopStatus.BackgroundTransparency = 1
-        hopStatus.TextColor3 = Color3.new(0.5, 0.5, 1) -- Màu xanh dương nhạt cho trạng thái Hop
-        hopStatus.TextSize = 12
-        hopStatus.Font = Enum.Font.Gotham
-        hopStatus.Text = ""
-        hopStatus.Parent = mainFrame
-
-        -- 4. Tắt 3D Rendering để siêu mượt (Tùy chọn: nếu anh muốn màn hình đen xì cho đỡ tốn pin)
-        -- game:GetService("RunService"):Set3dRenderingEnabled(false)
-
-        -- 5. Cập nhật số tiền liên tục
-        local lastVal = GetCurrentBeli()
-        task.spawn(function()
-            while task.wait(0.5) do
-                local cur = GetCurrentBeli()
-                -- Sử dụng hàm comma_value để hiển thị số tiền đẹp hơn
-                beliLabel.Text = "Beli: " .. comma_value(tostring(cur))
+            if token in line:
+                break
+            output_lines.append(line)
+            
+        if len(output_lines) >= 1:
+            try:
+                rc_line = output_lines[-1].strip()
+                # Check if last line is an integer (return code)
+                if rc_line.isdigit():
+                    return_code = int(rc_line)
+                    output_lines.pop() # Remove rc line
+            except:
+                pass
                 
-                if cur > lastVal then
-                    local added = cur - lastVal
-                    addLabel.Text = "+ " .. comma_value(tostring(added))
-                    lastVal = cur
-                    -- Hiệu ứng biến mất số cộng thêm sau 3 giây
-                    task.delay(3, function()
-                        if lastVal == cur then addLabel.Text = "" end
-                    end)
-                elseif cur < lastVal then
-                    lastVal = cur -- Reset nếu tiền giảm (đổi acc)
-                end
-            end
-        end)
-    end)
-end
+        return "".join(output_lines), return_code
 
--- Chạy Clean UI
-task.spawn(startCleanUI)
+def run_su(cmd):
+    global ROOT_SHELL
+    
+    # Hỗ trợ ADB Mode (Windows)
+    if ADB_MODE and ADB_DEVICE:
+        safe_cmd = cmd.replace("'", "'\\''")
+        # Chạy qua ADB Shell
+        # Lưu ý: Một số lệnh như 'am', 'pm' chạy trực tiếp qua adb shell ok.
+        # Nhưng 'cp', 'chown' vào /data cần quyền root.
+        # Nên ta bọc trong su -c.
+        full_cmd = f"adb -s {ADB_DEVICE} shell \"su -c '{safe_cmd}'\""
+        return run_cmd(full_cmd)
 
--- Lựa chọn autook.py (Tín hiệu thông báo cho Python biết đã sẵn sàng)
-SendSignal("ScriptReady", {mode = "AutoOK"})
+    with SU_LOCK:
+        if ROOT_SHELL is None or ROOT_SHELL.process.poll() is not None:
+            try:
+                ROOT_SHELL = PersistentSu()
+            except Exception:
+                # Fallback to old method if persistent fails
+                safe_cmd = cmd.replace("'", "'\\''")
+                return run_cmd(f"su -c '{safe_cmd}'")
+
+        try:
+            out, rc = ROOT_SHELL.run(cmd)
+            return type('obj', (object,), {'stdout': out, 'returncode': rc})
+        except Exception:
+             # Fallback
+             safe_cmd = cmd.replace("'", "'\\''")
+             return run_cmd(f"su -c '{safe_cmd}'")
+
+def check_root():
+    res = run_su("id")
+    return "uid=0" in res.stdout or "root" in res.stdout
+
+def load_config():
+    if not os.path.exists(CONFIG_FILE):
+        save_config(DEFAULT_CONFIG)
+        return DEFAULT_CONFIG.copy()
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            
+            # Đảm bảo các trường mặc định
+            for k, v in DEFAULT_CONFIG.items():
+                if k not in data and k not in ["vip_urls", "vip_index"]:
+                    data[k] = v
+            
+            # Tự động tạo list vip_urls từ vip1/vip2 để dùng trong code
+            vips = resolve_vip_links(data)
+            data["vip_urls"] = vips
+            
+            # Luôn mặc định vip_index = 0 (VIP 1) khi load config
+            # Vì user không muốn lưu trạng thái ưu tiên
+            data["vip_index"] = 0
+            
+            return data
+    except Exception:
+        return DEFAULT_CONFIG.copy()
+
+def save_config(cfg):
+    try:
+        # Chỉ lưu các trường cần thiết, bỏ qua các trường internal
+        tosave = {
+            "vip1_url": cfg.get("vip1_url", ""),
+            "vip2_url": cfg.get("vip2_url", ""),
+            "loop_infinite": cfg.get("loop_infinite", True),
+            "delay": cfg.get("delay", 5),
+            "normal_place_id": cfg.get("normal_place_id", 2753915549),
+            "target_beli": cfg.get("target_beli", 500000)
+        }
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(tosave, f, indent=4)
+    except Exception as e:
+        print(f"Lỗi lưu config: {e}")
+
+def ensure_files():
+    # Tạo config nếu thiếu
+    if not os.path.exists(CONFIG_FILE):
+        save_config(DEFAULT_CONFIG)
+    # Tạo cookies.txt rỗng nếu thiếu
+    if not os.path.exists(COOKIES_TXT_FILE):
+        try:
+            with open(COOKIES_TXT_FILE, "w", encoding="utf-8") as f:
+                f.write("")
+        except Exception:
+            pass
+    # Tạo appStorage.json tối thiểu nếu thiếu
+    if not os.path.exists(APPSTORAGE_FILE):
+        try:
+            os.makedirs(os.path.dirname(APPSTORAGE_FILE), exist_ok=True)
+            with open(APPSTORAGE_FILE, "w", encoding="utf-8") as f:
+                json.dump({"PkgName": ""}, f)
+        except Exception:
+            pass
+
+def get_owner(pkg):
+    res = run_su(f"ls -ld /data/data/{pkg}")
+    if res.returncode == 0:
+        parts = res.stdout.split()
+        if len(parts) >= 3:
+            return parts[2]
+    return None
+
+def force_stop(pkg):
+    # Ưu tiên dùng lệnh adb trực tiếp để đảm bảo tắt được app kể cả khi su lỗi
+    if ADB_MODE and ADB_DEVICE:
+        # am force-stop không cần su trên hầu hết thiết bị (nếu debuggable)
+        # Nhưng để chắc chắn, thử cả 2 cách
+        subprocess.run(f"adb -s {ADB_DEVICE} shell am force-stop {pkg}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
+    # Vẫn gọi qua run_su như fallback hoặc cho mode non-ADB
+    run_su(f"am force-stop {pkg}")
+
+def clear_data(pkg):
+    run_su(f"pm clear {pkg}")
+
+def launch_app(pkg):
+    # Dùng monkey để launch package bất kỳ
+    run_su(f"monkey -p {pkg} -c android.intent.category.LAUNCHER 1")
+
+
+def _sh_quote(s):
+    """Quote an toàn cho sh: '...' với escape dấu nháy trong chuỗi."""
+    return "'" + str(s).replace("'", "'\\''") + "'"
+
+
+def _deeplink_am_cmd(url, pkg):
+    """
+    Một dòng lệnh am start VIEW. URL bọc '...' để ký tự & ? = không bị shell cắt.
+    --es giúp một số ROM không chuyển link sang trình duyệt.
+    """
+    u = _sh_quote((url or "").strip())
+    return (
+        f"am start -a android.intent.action.VIEW -d {u} -p {pkg} "
+        f"--es com.android.browser.application_id {pkg}"
+    )
+
+
+def _ensure_roblox_applinks(pkg):
+    """Android 12+: luôn mở roblox.com bằng đúng package (clone). Lệnh cũ --auto-approve không hợp lệ."""
+    for domain in ("roblox.com", "www.roblox.com"):
+        run_su(
+            f"pm set-app-links-user-selection --user 0 --package {pkg} {domain} always 2>/dev/null || true"
+        )
+
+
+def _run_deeplink_once(url, pkg):
+    """Chạy intent VIEW: ADB dùng argv (không shell=True) để URL có & không bị Windows CMD phá."""
+    inner = _deeplink_am_cmd(url, pkg)
+    if ADB_MODE and ADB_DEVICE:
+        subprocess.run(
+            ["adb", "-s", ADB_DEVICE, "shell", "sh", "-c", inner],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    else:
+        run_su(inner)
+
+
+def open_url(url, pkg, retries=3, wait_after_launch=5):
+    """
+    Mở link VIP / private server vào đúng Roblox (clone).
+    - App Links đúng domain; đợi app khởi động; gửi deep link có thể lặp (Roblox đôi khi bỏ intent lần 1).
+    """
+    url = (url or "").strip()
+    if not url:
+        return
+
+    _ensure_roblox_applinks(pkg)
+    run_su(f"monkey -p {pkg} -c android.intent.category.LAUNCHER 1")
+    time.sleep(max(3, float(wait_after_launch)))
+
+    n = max(1, int(retries))
+    for i in range(n):
+        _run_deeplink_once(url, pkg)
+        if i < n - 1:
+            time.sleep(2.5)
+
+
+def open_place_id(pkg, place_id):
+    """robloxmobile://placeId=... — dùng chung pipeline open_url."""
+    open_url(f"robloxmobile://placeId={int(place_id)}", pkg, retries=3, wait_after_launch=5)
+
+def grant_permissions(pkg):
+    perms = [
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_MEDIA_VIDEO",
+        "android.permission.READ_MEDIA_AUDIO",
+        "android.permission.POST_NOTIFICATIONS"
+    ]
+    for p in perms:
+        run_su(f"pm grant {pkg} {p}")
+
+def mkdir_remote(pkg):
+    run_su(f"mkdir -p /data/data/{pkg}/app_webview/Default")
+    run_su(f"mkdir -p /data/data/{pkg}/files/appData/LocalStorage")
+
+def dest_appstorage_path(pkg):
+    # Ưu tiên check đường dẫn của Delta/Fluxus (nơi Lua đọc/ghi trực tiếp)
+    delta_paths = [
+        "/storage/emulated/0/Delta/Workspace/appStorage.json",
+        "/storage/emulated/0/Delta/workspace/appStorage.json",
+        "/storage/emulated/0/delta/Workspace/appStorage.json",
+        "/storage/emulated/0/delta/workspace/appStorage.json",
+        "/sdcard/Delta/Workspace/appStorage.json",
+    ]
+    for p in delta_paths:
+        parent = os.path.dirname(p)
+        # Check folder exists
+        res = run_su(f"ls -d '{parent}'")
+        if res.returncode == 0 and res.stdout.strip():
+            return p
+
+    candidates = [
+        f"/data/data/{pkg}/files/appData/LocalStorage/appStorage.json",
+        f"/data/data/{pkg}/files/LocalStorage/appStorage.json",
+        f"/data/data/{pkg}/files/appStorage.json",
+    ]
+    for p in candidates:
+        parent = os.path.dirname(p)
+        res = run_su(f"ls -d {parent}")
+        if res.returncode == 0 and res.stdout.strip():
+            return p
+    return f"/data/data/{pkg}/files/appData/LocalStorage/appStorage.json"
+
+def dest_cookie_path(pkg):
+    candidates = [
+        f"/data/data/{pkg}/app_webview/Default/Network/Cookies",
+        f"/data/data/{pkg}/app_webview/Default/Cookies",
+        f"/data/data/{pkg}/app_webview/Network/Cookies",
+        f"/data/data/{pkg}/app_webview/Cookies",
+    ]
+    for p in candidates:
+        parent = os.path.dirname(p)
+        res = run_su(f"ls -d {parent}")
+        if res.returncode == 0 and res.stdout.strip():
+            return p
+    return f"/data/data/{pkg}/app_webview/Default/Cookies"
+
+def to_webkit_time(dt):
+    if dt.tzinfo is not None:
+        dt = dt.replace(tzinfo=None)
+    epoch = datetime(1601, 1, 1)
+    delta = dt - epoch
+    return int(delta.total_seconds() * 1000000)
+
+def cookie_columns(conn):
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(cookies)")
+    return [r[1] for r in cur.fetchall()]
+
+def ensure_table(conn):
+    try:
+        cols = cookie_columns(conn)
+    except sqlite3.DatabaseError:
+        cols = []
+    
+    if len(cols) == 0:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS cookies (
+                creation_utc INTEGER NOT NULL,
+                host_key TEXT NOT NULL,
+                top_frame_site_key TEXT NOT NULL,
+                name TEXT NOT NULL,
+                value TEXT NOT NULL,
+                encrypted_value BLOB NOT NULL,
+                path TEXT NOT NULL,
+                expires_utc INTEGER NOT NULL,
+                is_secure INTEGER NOT NULL,
+                is_httponly INTEGER NOT NULL,
+                last_access_utc INTEGER NOT NULL,
+                has_expires INTEGER NOT NULL,
+                is_persistent INTEGER NOT NULL,
+                priority INTEGER NOT NULL,
+                samesite INTEGER NOT NULL,
+                source_scheme INTEGER NOT NULL,
+                source_port INTEGER NOT NULL,
+                last_update_utc INTEGER NOT NULL
+            )
+        """)
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS cookies_unique_index ON cookies(host_key, top_frame_site_key, name, path, source_scheme, source_port)")
+        conn.commit()
+
+def find_cookie_template():
+    candidates = [
+        os.path.join(BASE_DIR, "Cookies"),
+        os.path.join(BASE_DIR, "Cookies", "Cookies")
+    ]
+    for p in candidates:
+        if os.path.isfile(p):
+            return p
+    return None
+
+def prepare_cookie_db(path, value):
+    template_path = find_cookie_template()
+    if template_path:
+        try:
+            if os.path.exists(path): os.remove(path)
+            shutil.copy2(template_path, path)
+        except Exception:
+            pass
+    
+    conn = sqlite3.connect(path)
+    try:
+        ensure_table(conn)
+    except Exception:
+        conn.close()
+        if os.path.exists(path): os.remove(path)
+        conn = sqlite3.connect(path)
+        ensure_table(conn)
+
+    cols = cookie_columns(conn)
+    now = datetime.utcnow()
+    expire = now + timedelta(days=365)
+    
+    data = {
+        "creation_utc": to_webkit_time(now),
+        "host_key": ".roblox.com",
+        "name": ".ROBLOSECURITY",
+        "value": value,
+        "encrypted_value": b"",
+        "path": "/",
+        "expires_utc": to_webkit_time(expire),
+        "is_secure": 1,
+        "is_httponly": 1,
+        "last_access_utc": to_webkit_time(now),
+        "last_update_utc": to_webkit_time(now),
+        "has_expires": 1,
+        "is_persistent": 1,
+        "samesite": 0,
+        "priority": 1,
+        "source_scheme": 2,
+        "source_port": 0,
+        "is_same_party": 0,
+        "top_frame_site_key": "",
+        "source_type": 0,
+        "has_cross_site_ancestor": 0,
+    }
+
+    try:
+        if "name" in cols:
+            conn.execute("DELETE FROM cookies WHERE name IN (?,?)", (".ROBLOSECURITY", "ROBLOSECURITY"))
+            conn.execute("DELETE FROM cookies WHERE name LIKE ?", ("%ROBLOSECURITY%",))
+        if all(c in cols for c in ["host_key","name"]):
+            conn.execute("DELETE FROM cookies WHERE host_key LIKE ? AND name LIKE ?", ("%roblox.com%", "%ROBLOSECURITY%"))
+    except Exception as e:
+        print(f"DEBUG: Lỗi xóa cookie cũ: {e}")
+
+    insert_cols = [c for c in cols if c in data]
+    placeholders = ",".join(["?" for _ in insert_cols])
+    sql = f"INSERT OR REPLACE INTO cookies ({','.join(insert_cols)}) VALUES ({placeholders})"
+    
+    try:
+        conn.execute(sql, [data[c] for c in insert_cols])
+        conn.commit()
+    except Exception as e:
+        print(f"DEBUG: Lỗi chèn cookie mới: {e}")
+    finally:
+        conn.close()
+
+def valid_cookie_lines(lines):
+    import re
+    res = []
+    for s in lines:
+        t = s.lstrip("\ufeff").strip()
+        if not t: continue
+        if t.startswith("\"") and t.endswith("\""):
+            t = t[1:-1].strip()
+        m = re.search(r"_\|WARNING:-DO-NOT-SHARE-THIS.*", t)
+        if m:
+            res.append(m.group(0).strip())
+            continue
+        m2 = re.search(r"WARNING:-DO-NOT-SHARE-THIS.*", t)
+        if m2:
+            res.append("_|" + m2.group(0).strip())
+    return res
+
+def read_cookies():
+    global COOKIE_TOTAL
+    if not os.path.exists(COOKIES_TXT_FILE):
+        COOKIE_TOTAL = 0
+        return []
+    with open(COOKIES_TXT_FILE, "r", encoding="utf-8") as f:
+        lines = [l.strip() for l in f.readlines()]
+    cookies = valid_cookie_lines(lines)
+    COOKIE_TOTAL = len(cookies)
+    return cookies
+
+def find_roblox_packages():
+    """Tìm tất cả các package có tên chứa 'roblox'"""
+    print(" -> Đang quét tìm các bản Roblox (Clone)...", end="\r")
+    res = run_su("pm list packages | grep roblox")
+    if res.returncode != 0:
+        return []
+    
+    pkgs = []
+    for line in res.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("package:"):
+            p = line.replace("package:", "").strip()
+            pkgs.append(p)
+    return sorted(pkgs)
+
+def wait_for_cookie_file(pkg, timeout=10.0):
+    start = time.time()
+    candidates = [
+        f"/data/data/{pkg}/app_webview/Default/Network/Cookies",
+        f"/data/data/{pkg}/app_webview/Default/Cookies",
+        f"/data/data/{pkg}/app_webview/Network/Cookies",
+        f"/data/data/{pkg}/app_webview/Cookies",
+    ]
+    while time.time() - start < timeout:
+        for p in candidates:
+            # Check if file exists
+            res = run_su(f"ls {p}")
+            if res.returncode == 0 and "No such file" not in res.stdout and "not found" not in res.stdout:
+                return p
+        time.sleep(0.5)
+    return f"/data/data/{pkg}/app_webview/Default/Cookies"
+
+def check_cookie_status(cookie):
+    """
+    Check cookie sống hay chết.
+    Return True nếu Live (hoặc lỗi mạng không xác định).
+    Return False nếu Die (401 Unauthorized).
+    """
+    url = "https://users.roblox.com/v1/users/authenticated"
+    try:
+        req = urllib.request.Request(url)
+        req.add_header("Cookie", f".ROBLOSECURITY={cookie}")
+        # Timeout 5s để không treo quá lâu
+        with urllib.request.urlopen(req, timeout=5) as response:
+            if response.getcode() == 200:
+                return True
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            return False
+    except Exception as e:
+        # Lỗi mạng hoặc timeout -> Coi như Live để thử login
+        print(f" [Check Cookie] Lỗi check (giả định Live): {e}")
+        return True
+    return True
+
+def handle_dead_cookie(cookie):
+    """Ghi log die và xóa khỏi cookies.txt"""
+    # 1. Ghi vào file die
+    die_file = os.path.join(BASE_DIR, "cookies_die.txt")
+    try:
+        with open(die_file, "a", encoding="utf-8") as f:
+            f.write(cookie + "\n")
+        print(f" -> Đã lưu cookie die vào {die_file}")
+    except Exception as e:
+        print(f"Lỗi ghi file die: {e}")
+
+    # 2. Xóa khỏi cookies.txt
+    try:
+        # Đọc lại file trực tiếp để đảm bảo mới nhất
+        if os.path.exists(COOKIES_TXT_FILE):
+            with open(COOKIES_TXT_FILE, "r", encoding="utf-8") as f:
+                lines = [l.strip() for l in f.readlines() if l.strip()]
+            
+            if cookie in lines:
+                lines.remove(cookie)
+                with open(COOKIES_TXT_FILE, "w", encoding="utf-8") as f:
+                    for l in lines:
+                        f.write(l + "\n")
+                print(f" -> Đã xóa cookie die khỏi danh sách. Còn lại: {len(lines)}")
+    except Exception as e:
+        print(f"Lỗi xóa cookie die: {e}")
+
+def inject_appstorage(pkg, vip_server_index=None):
+    """Inject appStorage.json chứa PkgName và ServerType"""
+    try:
+        cfg = load_config()
+        js = {}
+        if os.path.exists(APPSTORAGE_FILE):
+             with open(APPSTORAGE_FILE, "r", encoding='utf-8') as f:
+                 js = json.load(f)
+        js["PkgName"] = pkg # Inject package name
+        
+        # Inject ServerType cho Lua logic (Option 4)
+        current_vip_idx = 0
+        if vip_server_index is not None:
+            current_vip_idx = int(vip_server_index)
+        else:
+            current_vip_idx = int(cfg.get("vip_index", 0) or 0)
+            
+        CURRENT_VIP_INDEX[pkg] = current_vip_idx
+        if current_vip_idx == 0:
+            js["ServerType"] = "VIP1"
+        elif current_vip_idx == 1:
+            js["ServerType"] = "VIP2"
+        else:
+            js["ServerType"] = "NORMAL"
+
+        tmp_as = os.path.join(BASE_DIR, f"temp_as_{pkg}.json")
+        with open(tmp_as, 'w', encoding='utf-8') as f:
+            json.dump(js, f)
+        
+        dest_s = dest_appstorage_path(pkg)
+        owner = get_owner(pkg)
+        
+        copy_file_to_device(tmp_as, dest_s)
+        
+        # [FIX] Force write to multiple Executor paths to ensure Lua reads correct ServerType
+        # Support: Delta, Fluxus, Hydrogen, Codex, Arceus X (spdm), Vega X
+        executor_paths = [
+            # Delta
+            "/storage/emulated/0/Delta/Workspace/appStorage.json",
+            "/storage/emulated/0/Delta/workspace/appStorage.json",
+            "/storage/emulated/0/delta/Workspace/appStorage.json",
+            "/storage/emulated/0/delta/workspace/appStorage.json",
+            # Fluxus
+            "/storage/emulated/0/Fluxus/workspace/appStorage.json",
+            "/storage/emulated/0/Fluxus/Workspace/appStorage.json",
+            # Hydrogen
+            "/storage/emulated/0/Hydrogen/workspace/appStorage.json",
+            "/storage/emulated/0/Hydrogen/Workspace/appStorage.json",
+            # Codex
+            "/storage/emulated/0/Codex/Workspace/appStorage.json",
+            "/storage/emulated/0/Codex/workspace/appStorage.json",
+            # Arceus X (thường dùng folder spdm)
+            "/storage/emulated/0/spdm/workspace/appStorage.json",
+            "/storage/emulated/0/spdm/Workspace/appStorage.json",
+            # Vega X
+            "/storage/emulated/0/VegaX/Workspace/appStorage.json",
+            "/storage/emulated/0/VegaX/workspace/appStorage.json"
+        ]
+        for dp in executor_paths:
+            if dp != dest_s:
+                # Check if folder exists
+                dparent = os.path.dirname(dp)
+                # Chỉ copy nếu thư mục cha tồn tại để tránh tạo rác
+                if run_su(f"ls -d '{dparent}'").returncode == 0:
+                    copy_file_to_device(tmp_as, dp)
+                    run_su(f"chmod 666 '{dp}'") # Ensure readable/writable
+                    # print(f"[DEBUG] Force inject ServerType={js.get('ServerType')} to {dp}")
+
+        # Chỉ chown nếu không phải là đường dẫn thẻ nhớ (SDCard)
+        if not dest_s.startswith("/storage/") and not dest_s.startswith("/sdcard/"):
+            if owner:
+                run_su(f"chown {owner}:{owner} {dest_s}")
+        
+        run_su(f"chmod 777 {dest_s}")
+        
+        if os.path.exists(tmp_as):
+            os.remove(tmp_as)
+        return True
+    except Exception as e:
+        log_status(f"Lỗi inject appStorage riêng lẻ: {e}")
+        return False
+
+def inject_cookie(val, cfg, pkg, nickname="", vip_server_index=None, keep_data=False):
+    if STOP_EVT.is_set():
+        log_status(f"{nickname} [{pkg}] BỊ HỦY (STOP)")
+        return False
+
+    # [NEW] Check Cookie Live/Die
+    # Chỉ check nếu val có nội dung (tránh check empty string gây lỗi)
+    if val and len(val) > 50: 
+        print(f"{nickname} [{pkg}] Đang check cookie...", end="\r")
+        if not check_cookie_status(val):
+            log_status(f"{nickname} [{pkg}] PHÁT HIỆN COOKIE DIE! -> Auto đổi acc khác...")
+            handle_dead_cookie(val)
+            
+            # Tìm cookie thay thế từ file (đã update)
+            new_cookies = read_cookies()
+            if not new_cookies:
+                log_status(f"[{pkg}] HẾT SẠCH COOKIE! Dừng.")
+                return False
+                
+            # Lấy index hiện tại (đã trượt)
+            current_idx = COOKIE_INDEXES.get(pkg, 0)
+            if current_idx >= len(new_cookies):
+                current_idx = 0
+                
+            COOKIE_INDEXES[pkg] = current_idx
+            next_cookie = new_cookies[current_idx]
+            
+            # Gọi đệ quy với cookie mới
+            return inject_cookie(next_cookie, cfg, pkg, nickname, vip_server_index, keep_data)
+        else:
+            print(f"{nickname} [{pkg}] Cookie Live! Tiếp tục...            ")
+
+    if not check_root():
+        log_status(f"LỖI: Không có quyền Root!")
+        return False
+
+    if not keep_data:
+        log_status(f"{nickname} [{pkg}] Chuẩn bị (Full Reset)...")
+        force_stop(pkg)
+        clear_data(pkg)
+        grant_permissions(pkg)
+        
+        log_status(f"{nickname} [{pkg}] Khởi tạo...")
+        launch_app(pkg)
+        
+        # Đợi 3-5s để roblox tạo đầy đủ file (theo yêu cầu user)
+        log_status(f" -> Đợi 5s để tạo file hệ thống...")
+        time.sleep(5)
+        
+        force_stop(pkg)
+        mkdir_remote(pkg)
+    else:
+        log_status(f"{nickname} [{pkg}] Chuẩn bị (Fast Switch)...")
+        force_stop(pkg)
+        # Không clear data, chỉ stop để sửa file
+
+    if STOP_EVT.is_set():
+        log_status(f"{nickname} [{pkg}] BỊ HỦY (STOP)")
+        return False
+    
+    owner = get_owner(pkg)
+    if not owner:
+        log_status(f"LỖI: Không tìm thấy owner của {pkg}")
+        # Nếu đang keep_data mà lỗi owner, thử fallback về full reset
+        if keep_data:
+            return inject_cookie(val, cfg, pkg, nickname, vip_server_index, keep_data=False)
+        return False
+        
+    log_status(f"{nickname} [{pkg}] Injecting...")
+    
+    if not keep_data:
+        # Fix permission thư mục
+        run_su(f"chown -R {owner}:{owner} /data/data/{pkg}/app_webview")
+        run_su(f"chown -R {owner}:{owner} /data/data/{pkg}/files")
+        run_su(f"chmod -R 777 /data/data/{pkg}/app_webview")
+        run_su(f"chmod -R 777 /data/data/{pkg}/files")
+        
+        # Sử dụng tên file temp riêng biệt cho từng package để tránh xung đột
+        tmp_db = os.path.join(BASE_DIR, f"temp_cookie_{pkg}.db")
+        prepare_cookie_db(tmp_db, val)
+        
+        dest = dest_cookie_path(pkg)
+        # Thay thế run_su(cp) bằng copy_file_to_device
+        copy_file_to_device(tmp_db, dest)
+        run_su(f"chown {owner}:{owner} {dest}")
+        run_su(f"chmod 777 {dest}")
+        
+        if os.path.exists(tmp_db):
+            os.remove(tmp_db)
+
+    # Inject ServerType (Luôn thực hiện)
+    # [FIX] Logic thông minh hơn để xác định ServerType dựa trên Config
+    as_idx = 0
+    if vip_server_index is not None:
+        as_idx = int(vip_server_index)
+    elif cfg.get("use_normal") and not cfg.get("use_vip"):
+        as_idx = 2 # Normal
+    else:
+        as_idx = int(cfg.get("vip_index", 0) or 0)
+        
+    inject_appstorage(pkg, as_idx)
+    
+    if os.path.exists(tmp_db):
+        os.remove(tmp_db)
+        
+    force_stop(pkg)
+    # [FIX] Tăng thời gian đợi theo yêu cầu user (2-3s -> 5s cho chắc chắn)
+    log_status(f" -> Đợi 5s để app tắt hẳn và ổn định...")
+    time.sleep(5) 
+    
+    log_status(f"{nickname} [{pkg}] Mở App...")
+    
+    # Logic mở app mới hỗ trợ Normal Place ID
+    if cfg.get("use_vip"):
+        urls = cfg.get("vip_urls") or []
+        # Ưu tiên vip_server_index được truyền vào
+        idx = 0
+        if vip_server_index is not None:
+            idx = int(vip_server_index)
+        else:
+            idx = int(cfg.get("vip_index", 0) or 0)
+        CURRENT_VIP_INDEX[pkg] = idx
+            
+        vip_link = None
+        if urls and 0 <= idx < len(urls):
+            vip_link = urls[idx]
+        else:
+            vip_link = cfg.get("vip_url") or ""
+            
+        if vip_link:
+            log_status(f" -> Mở VIP Link: ...{vip_link[-20:]}")
+            open_url(vip_link, pkg)
+        else:
+            # Fallback nếu config lỗi
+            log_status(" -> Không có VIP Link, mở thường (Place ID)...")
+            pid = cfg.get("normal_place_id", 2753915549)
+            inject_appstorage(pkg, 2)
+            open_place_id(pkg, pid)
+            
+    elif cfg.get("use_normal"):
+        if cfg.get("normal_url"):
+            log_status(f" -> Mở Normal Link")
+            open_url(cfg["normal_url"], pkg)
+        else:
+            pid = cfg.get("normal_place_id", 2753915549)
+            log_status(f" -> Mở Normal Place ID: {pid}")
+            open_place_id(pkg, pid)
+    else:
+        launch_app(pkg)
+    OPEN_TS[pkg] = time.time()
+    HEARTBEAT_DATA[pkg] = 0 # Xóa heartbeat cũ để tránh logic monitor hiểu nhầm
+        
+    return True
+
+def handle_signal(pkg, vip_server_index=None):
+    """Xử lý tín hiệu đổi nick từ Lua"""
+    
+    # [FIX] Tự động detect package nếu nhận được "unknown"
+    if not pkg or pkg == "unknown":
+        print(" -> [WARN] Nhận tín hiệu từ 'unknown'. Đang thử detect package...")
+        found_pkgs = find_roblox_packages()
+        if len(found_pkgs) == 1:
+            pkg = found_pkgs[0]
+            print(f" -> [AUTO-FIX] Đã map 'unknown' thành '{pkg}'")
+        elif len(found_pkgs) > 1:
+            # Nếu có nhiều package, thử tìm package đang chạy (top activity)?
+            # Hoặc đơn giản lấy cái đầu tiên
+            pkg = found_pkgs[0] 
+            print(f" -> [AUTO-FIX] Có nhiều package, chọn '{pkg}' để xử lý.")
+        else:
+            print(" -> [ERROR] Không tìm thấy package nào để xử lý 'unknown'!")
+            return False
+
+    cookies = read_cookies()
+    if not cookies: 
+        log_status("Hết Cookie!")
+        return False
+    
+    # Lấy index tiếp theo
+    curr_idx = COOKIE_INDEXES.get(pkg, -1)
+    
+    # Nếu có vip_server_index (được gửi từ Lua để yêu cầu đổi server),
+    # ta giữ nguyên cookie hiện tại mà chỉ đổi server (inject lại cùng cookie nhưng server khác).
+    # Tuy nhiên, logic cũ là đổi ACCOUNT.
+    # User request: "khi không đủ beli sẽ gửi tín hiệu lên python... chuyển severvip 2"
+    # Điều này có nghĩa là đổi Server nhưng vẫn giữ Account cũ? Hay đổi cả Account?
+    # Theo ngữ cảnh "auto chest... gửi tín hiệu... chuyển vip 2", thường là đổi server để farm tiếp.
+    # Nhưng tên hàm là ChangeAccount.
+    # Nếu Lua gửi ChangeAccount kèm SignalVipIndex, ta sẽ ưu tiên đổi Server.
+    
+    cfg = load_config()
+    is_no_loop = bool(OPTION5_ACTIVE or OPTION6_ACTIVE or (not cfg.get("loop_infinite", False)))
+
+    if vip_server_index is not None:
+        new_index = 0 if curr_idx < 0 else curr_idx
+        log_msg = f"[SMART] {pkg} -> Đổi Server VIP (Index: {vip_server_index})"
+        nick_suffix = f"[Nick {new_index+1}/{len(cookies)} | VIP {vip_server_index}]"
+    else:
+        if is_no_loop:
+            new_index = 0 if curr_idx < 0 else (curr_idx + 1)
+            if new_index >= len(cookies):
+                log_status(f"[{pkg}] Đã chạy hết danh sách Cookie (No Loop). Dừng lại.")
+                force_stop(pkg)
+                if pkg not in NO_LOOP_DONE_PKGS:
+                    NO_LOOP_DONE_PKGS.add(pkg)
+                if (OPTION5_ACTIVE or OPTION6_ACTIVE) and ACTIVE_RUN_PKGS and all(p in NO_LOOP_DONE_PKGS for p in ACTIVE_RUN_PKGS):
+                    STOP_EVT.set()
+                return False
+            log_msg = f"[SIGNAL] {pkg} -> Đổi sang Account #{new_index+1}/{len(cookies)}"
+            nick_suffix = f"[Auto {new_index+1}/{len(cookies)}]"
+        else:
+            if curr_idx != -1:
+                 RANDOM_DONE_TS[curr_idx] = time.time()
+
+            start_search = (curr_idx + 1) % len(cookies)
+            found_idx = -1
+            min_wait = float('inf')
+
+            for i in range(len(cookies)):
+                check_idx = (start_search + i) % len(cookies)
+                last_run = RANDOM_DONE_TS.get(check_idx, 0)
+                wait_time = 7200 - (time.time() - last_run)
+
+                if wait_time <= 0:
+                    found_idx = check_idx
+                    break
+                else:
+                    if wait_time < min_wait:
+                        min_wait = wait_time
+
+            if found_idx != -1:
+                new_index = found_idx
+                log_msg = f"[SIGNAL] {pkg} -> Đổi sang Account #{new_index+1}/{len(cookies)} (Ready)"
+            else:
+                print(f" -> [WAIT] Tất cả account đều đang chờ cooldown (Min wait: {int(min_wait)}s).")
+                print(f" -> Đợi {int(min_wait)}s rồi thử lại...")
+                time.sleep(min_wait + 2)
+                for i in range(len(cookies)):
+                    check_idx = (start_search + i) % len(cookies)
+                    last_run = RANDOM_DONE_TS.get(check_idx, 0)
+                    if time.time() - last_run >= 7200:
+                        new_index = check_idx
+                        log_msg = f"[SIGNAL] {pkg} -> Đổi sang Account #{new_index+1}/{len(cookies)} (After Wait)"
+                        break
+                if new_index == -1:
+                     new_index = start_search
+                     log_msg = f"[WARN] Force run Account #{new_index+1}/{len(cookies)}"
+
+            nick_suffix = f"[Auto {new_index+1}/{len(cookies)}]"
+
+    COOKIE_INDEXES[pkg] = new_index
+    
+    if (OPTION5_ACTIVE or OPTION6_ACTIVE) and vip_server_index is None:
+        global TOTAL_ACCOUNTS_PROCESSED
+        TOTAL_ACCOUNTS_PROCESSED += 1
+    
+    cookie = cookies[new_index]
+    
+    print(f"\n{log_msg}")
+    
+    # Inject lại
+    try:
+        # [FIX] Khi đổi nick (vip_server_index=None), cần truyền đúng index server hiện tại 
+        # để inject_cookie biết đường mở đúng link VIP (thay vì default=0)
+        target_vip_idx = vip_server_index
+        if target_vip_idx is None:
+            target_vip_idx = CURRENT_VIP_INDEX.get(pkg, 0)
+            
+        inject_cookie(cookie, cfg, pkg, nickname=nick_suffix, vip_server_index=target_vip_idx)
+        return True
+    except Exception as e:
+        print(f"Lỗi đổi nick: {e}")
+        return False
+
+def handle_reset(pkg):
+    """Xử lý tín hiệu Reset Game từ Lua"""
+    cfg = load_config()
+    log_status(f"[RESET] Đang reset {pkg}...")
+    
+    force_stop(pkg)
+    time.sleep(3) # [FIX] Đợi 3s để app tắt hẳn
+        
+    log_status(f"[RESET] Mở lại {pkg}...")
+    if cfg["use_vip"]:
+        urls = cfg.get("vip_urls") or []
+        idx = int(cfg.get("vip_index", 0) or 0)
+        vip_link = None
+        if urls and 0 <= idx < len(urls):
+            vip_link = urls[idx]
+        else:
+            vip_link = cfg.get("vip_url") or ""
+        if vip_link:
+            inject_appstorage(pkg, idx)
+            open_url(vip_link, pkg)
+        elif cfg.get("normal_url") and cfg.get("use_normal"):
+            inject_appstorage(pkg, 2)
+            open_url(cfg["normal_url"], pkg)
+        elif cfg.get("use_normal"):
+            pid = cfg.get("normal_place_id", 2753915549)
+            inject_appstorage(pkg, 2)
+            open_place_id(pkg, pid)
+        else:
+            launch_app(pkg)
+    elif cfg["use_normal"] and cfg["normal_url"]:
+        inject_appstorage(pkg, 2)
+        open_url(cfg["normal_url"], pkg)
+    elif cfg["use_normal"]:
+        pid = cfg.get("normal_place_id", 2753915549)
+        inject_appstorage(pkg, 2)
+        open_place_id(pkg, pid)
+    else:
+        launch_app(pkg)
+    return True
+
+def switch_vip_index(new_index, pkg=None):
+    try:
+        cfg = load_config()
+        urls = cfg.get("vip_urls") or []
+        if new_index < 0 or (urls and new_index >= len(urls)):
+            return False, "Index ngoài phạm vi"
+        cfg["vip_index"] = int(new_index)
+        save_config(cfg)
+        if pkg:
+            idx = cfg["vip_index"]
+            vip_link = None
+            if urls and 0 <= idx < len(urls):
+                vip_link = urls[idx]
+            else:
+                vip_link = cfg.get("vip_url") or ""
+            if vip_link:
+                # [FIX] Inject appStorage để cập nhật ServerType trước khi mở
+                inject_appstorage(pkg, idx)
+                
+                # Đảm bảo đóng app trước khi mở link mới
+                force_stop(pkg)
+                time.sleep(3) # [FIX] Đợi 3s để app tắt hẳn
+                open_url(vip_link, pkg)
+        return True, "OK"
+    except Exception as e:
+        return False, str(e)
+
+def open_vip1(pkg, cfg):
+    vip_link = ""
+    urls = cfg.get("vip_urls") or []
+    if urls and urls[0]:
+        vip_link = urls[0]
+    else:
+        vip_link = cfg.get("vip_url") or ""
+    if vip_link:
+        open_url(vip_link, pkg)
+    else:
+        launch_app(pkg)
+
+def open_vip_index(pkg, cfg, idx):
+    urls = cfg.get("vip_urls") or []
+    vip_link = None
+    if urls and 0 <= idx < len(urls):
+        vip_link = urls[idx]
+    else:
+        vip_link = cfg.get("vip_url") or ""
+    if vip_link:
+        open_url(vip_link, pkg)
+    else:
+        launch_app(pkg)
+
+def treo_acc_loop(pkgs, cfg, offline_timeout=150):
+    if not SERVER_STARTED:
+        try:
+            start_server_thread(8000)
+            globals()["SERVER_STARTED"] = True
+        except Exception as e:
+            print(f"Lưu ý: {e}")
+    start_stop_listener()
+    print("\n[MONITOR] Treo Account Roblox: mở VIP1 và kiểm tra heartbeat mỗi 5s, dừng bằng 9 + Enter\n")
+    # Khởi động vào VIP1 ngay từ đầu
+    for pkg in pkgs:
+        try:
+            force_stop(pkg)
+            time.sleep(1)
+            open_vip1(pkg, cfg)
+            OPEN_TS[pkg] = time.time()
+            HEARTBEAT_DATA[pkg] = 0
+            print(f"[MONITOR] {pkg} START → VIP1")
+        except Exception as e:
+            print(f"[MONITOR] Lỗi mở đầu {pkg}: {e}")
+    last_update = 0
+    while not STOP_EVT.is_set():
+        now = time.time()
+        total_cookies = COOKIE_TOTAL or len(read_cookies())
+        rows = []
+        for pkg in pkgs:
+            last = HEARTBEAT_DATA.get(pkg, 0)
+            open_ts = OPEN_TS.get(pkg, 0)
+            status = ""
+            seen = ""
+            if last == 0:
+                if open_ts and now - open_ts < offline_timeout:
+                    diff = int(now - open_ts)
+                    status = "WAIT HB"
+                    seen = f"{diff}/{offline_timeout}s"
+                else:
+                    status = "NO HB"
+                    seen = f">{offline_timeout}s"
+                    try:
+                        force_stop(pkg)
+                        time.sleep(1)
+                        open_vip1(pkg, cfg)
+                        OPEN_TS[pkg] = time.time()
+                        HEARTBEAT_DATA[pkg] = 0
+                    except Exception as e:
+                        print(f"[MONITOR] Lỗi restart {pkg}: {e}")
+                        status = "RESTART ERR"
+                        seen = "-"
+            elif now - last > offline_timeout:
+                status = "OFFLINE"
+                seen = f">{offline_timeout}s"
+                try:
+                    force_stop(pkg)
+                    time.sleep(1)
+                    open_vip1(pkg, cfg)
+                    OPEN_TS[pkg] = time.time()
+                    HEARTBEAT_DATA[pkg] = 0
+                except Exception as e:
+                    print(f"[MONITOR] Lỗi restart {pkg}: {e}")
+                    status = "RESTART ERR"
+                    seen = "-"
+            else:
+                diff = int(now - last)
+                status = "ONLINE"
+                seen = f"{diff}s"
+            idx = COOKIE_INDEXES.get(pkg, -1)
+            nick = f"{idx+1}/{total_cookies}" if idx >= 0 and total_cookies > 0 else "-"
+            rows.append((pkg, nick, status, seen))
+        if time.time() - last_update > 1:
+            last_update = time.time()
+            clear_screen()
+            print("\033[1;33m--- JK93S MONITOR: Treo acc Roblox ---\033[0m")
+            print("Ấn 9 + Enter để dừng\n")
+            print(f"{'PACKAGE':<30} | {'NICK':<10} | {'STATUS':<10} | {'SEEN':<12}")
+            print("-" * 60)
+            for pkg, nick, status, seen in rows:
+                print(f"{pkg:<30} | {nick:<10} | {status:<10} | {seen:<12}", end="\n")
+            sys.stdout.flush()
+        time.sleep(1)
+    print("[MONITOR] Đã dừng treo acc.")
+
+def option4_monitor_loop(pkgs):
+    cfg = load_config()
+    TIMEOUT_1 = 240
+    TIMEOUT_2 = 100
+    RETRY_COUNTS = {}
+    LAST_KNOWN_OPEN = {}
+    last_update = 0
+    while True:
+        if STOP_EVT.is_set():
+            break
+        now = time.time()
+        total_cookies = COOKIE_TOTAL or len(read_cookies())
+        rows = []
+        for pkg in pkgs:
+            current_open_ts = OPEN_TS.get(pkg, 0)
+            if current_open_ts != LAST_KNOWN_OPEN.get(pkg, 0):
+                RETRY_COUNTS[pkg] = 0
+                LAST_KNOWN_OPEN[pkg] = current_open_ts
+            last = HEARTBEAT_DATA.get(pkg, 0)
+            if last > 0 and (now - last < 60):
+                if last > RESTART_TS.get(pkg, 0):
+                    RETRY_COUNTS[pkg] = 0
+                    RESTART_TS[pkg] = 0
+                    SWITCH_TS[pkg] = 0
+            base = last or OPEN_TS.get(pkg, 0)
+            if base == 0:
+                continue
+            diff = now - base
+            stage = RETRY_COUNTS.get(pkg, 0)
+            status = ""
+            seen = ""
+            if last > 0 and (now - last < 60):
+                info = HEARTBEAT_INFO.get(pkg, {})
+                stype = info.get('server_type', 'ONLINE')
+                if stype == "VIP1": stype = "ONLINE (V1)"
+                elif stype == "VIP2": stype = "ONLINE (V2)"
+                elif stype == "NORMAL": stype = "ONLINE (NM)"
+                else: stype = f"ONLINE ({stype})" if stype != 'ONLINE' else "ONLINE"
+                
+                status = stype
+                seen = f"{int(now - last)}s"
+            elif stage == 0:
+                if diff < TIMEOUT_1:
+                    status = "RESTART IN"
+                    seen = f"{int(TIMEOUT_1 - diff)}s"
+                else:
+                    if RESTART_TS.get(pkg, 0) < base:
+                        try:
+                            log_status(f"[MONITOR] {pkg}: Không online {int(diff)}s -> Restart Game...")
+                            force_stop(pkg)
+                            time.sleep(3)
+                            idx = CURRENT_VIP_INDEX.get(pkg, int(cfg.get('vip_index', 0) or 0))
+                            inject_appstorage(pkg, idx)
+                            open_vip_index(pkg, cfg, idx)
+                            OPEN_TS[pkg] = time.time()
+                            LAST_KNOWN_OPEN[pkg] = OPEN_TS[pkg]
+                            HEARTBEAT_DATA[pkg] = 0
+                            RESTART_TS[pkg] = time.time()
+                            RETRY_COUNTS[pkg] = 1
+                        except Exception as e:
+                            print(f"Lỗi restart: {e}")
+            elif stage == 1:
+                if diff < TIMEOUT_2:
+                    status = "CHANGE IN"
+                    seen = f"{int(TIMEOUT_2 - diff)}s"
+                else:
+                    if SWITCH_TS.get(pkg, 0) < base:
+                        SWITCH_TS[pkg] = time.time()
+                        def _async_switch(p):
+                            try:
+                                log_status(f"[MONITOR] {p}: Restart xong vẫn k online ({int(TIMEOUT_2)}s) -> Đổi Acc...")
+                                handle_signal(p)
+                            except Exception:
+                                pass
+                        RETRY_COUNTS[pkg] = 0
+                        HEARTBEAT_DATA[pkg] = 0
+                        OPEN_TS[pkg] = time.time()
+                        LAST_KNOWN_OPEN[pkg] = OPEN_TS[pkg]
+                        threading.Thread(target=_async_switch, args=(pkg,), daemon=True).start()
+                        status = "SWITCH"
+                        seen = "-"
+            else:
+                status = "WAIT"
+                seen = f"{int(diff)}s"
+            idx = COOKIE_INDEXES.get(pkg, -1)
+            nick = f"{idx+1}/{total_cookies}" if idx >= 0 and total_cookies > 0 else "-"
+            rows.append((pkg, nick, status, seen))
+        if time.time() - last_update > 1:
+            last_update = time.time()
+            clear_screen()
+            print("\033[1;33m--- JK93S MONITOR (Option 4): Online Watch ---\033[0m")
+            print("Ấn 9 + Enter để dừng\n")
+            print(f"{'PACKAGE':<30} | {'NICK':<10} | {'STATUS':<12} | {'COUNTDOWN':<12}")
+            print("-" * 60)
+            for pkg, nick, status, seen in rows:
+                print(f"{pkg:<30} | {nick:<10} | {status:<12} | {seen:<12}")
+            sys.stdout.flush()
+        time.sleep(1)
+
+def option5_monitor_loop(pkgs):
+    cfg = load_config()
+    TIMEOUT_1 = 240
+    TIMEOUT_2 = 100
+    RETRY_COUNTS = {}
+    LAST_KNOWN_OPEN = {}
+    last_update = 0
+    while True:
+        if STOP_EVT.is_set():
+            break
+        now = time.time()
+        total_cookies = COOKIE_TOTAL or len(read_cookies())
+        rows = []
+        for pkg in pkgs:
+            current_open_ts = OPEN_TS.get(pkg, 0)
+            if current_open_ts != LAST_KNOWN_OPEN.get(pkg, 0):
+                RETRY_COUNTS[pkg] = 0
+                LAST_KNOWN_OPEN[pkg] = current_open_ts
+            last = HEARTBEAT_DATA.get(pkg, 0)
+            if last > 0 and (now - last < 60):
+                if last > RESTART_TS.get(pkg, 0):
+                    RETRY_COUNTS[pkg] = 0
+                    RESTART_TS[pkg] = 0
+                    SWITCH_TS[pkg] = 0
+            base = last or OPEN_TS.get(pkg, 0)
+            if base == 0:
+                continue
+            diff = now - base
+            stage = RETRY_COUNTS.get(pkg, 0)
+            status = ""
+            seen = ""
+            if last > 0 and (now - last < 60):
+                info = HEARTBEAT_INFO.get(pkg, {})
+                stype = info.get('server_type', 'ONLINE')
+                if stype == "VIP1": stype = "ONLINE (V1)"
+                elif stype == "VIP2": stype = "ONLINE (V2)"
+                elif stype == "NORMAL": stype = "ONLINE (NM)"
+                else: stype = f"ONLINE ({stype})" if stype != 'ONLINE' else "ONLINE"
+                
+                status = stype
+                seen = f"{int(now - last)}s"
+            elif stage == 0:
+                if diff < TIMEOUT_1:
+                    status = "RESTART IN"
+                    seen = f"{int(TIMEOUT_1 - diff)}s"
+                else:
+                    if RESTART_TS.get(pkg, 0) < base:
+                        try:
+                            log_status(f"[MONITOR] {pkg}: Không online {int(diff)}s -> Restart Game...")
+                            force_stop(pkg)
+                            time.sleep(3)
+                            idx = CURRENT_VIP_INDEX.get(pkg, int(cfg.get('vip_index', 0) or 0))
+                            inject_appstorage(pkg, idx)
+                            open_vip_index(pkg, cfg, idx)
+                            OPEN_TS[pkg] = time.time()
+                            LAST_KNOWN_OPEN[pkg] = OPEN_TS[pkg]
+                            HEARTBEAT_DATA[pkg] = 0
+                            RESTART_TS[pkg] = time.time()
+                            RETRY_COUNTS[pkg] = 1
+                        except Exception as e:
+                            print(f"Lỗi restart: {e}")
+            elif stage == 1:
+                if diff < TIMEOUT_2:
+                    status = "CHANGE IN"
+                    seen = f"{int(TIMEOUT_2 - diff)}s"
+                else:
+                    if SWITCH_TS.get(pkg, 0) < base:
+                        SWITCH_TS[pkg] = time.time()
+                        def _async_switch(p):
+                            try:
+                                log_status(f"[MONITOR] {p}: Restart xong vẫn k online ({int(TIMEOUT_2)}s) -> Đổi Acc...")
+                                handle_signal(p)
+                            except Exception:
+                                pass
+                        RETRY_COUNTS[pkg] = 0
+                        HEARTBEAT_DATA[pkg] = 0
+                        OPEN_TS[pkg] = time.time()
+                        LAST_KNOWN_OPEN[pkg] = OPEN_TS[pkg]
+                        threading.Thread(target=_async_switch, args=(pkg,), daemon=True).start()
+                        status = "SWITCH"
+                        seen = "-"
+            else:
+                status = "WAIT"
+                seen = f"{int(diff)}s"
+            idx = COOKIE_INDEXES.get(pkg, -1)
+            nick = f"{idx+1}/{total_cookies}" if idx >= 0 and total_cookies > 0 else "-"
+            rows.append((pkg, nick, status, seen))
+        if time.time() - last_update > 1:
+            last_update = time.time()
+            clear_screen()
+            print("\033[1;33m--- JK93S MONITOR (Option 5): No Loop + Count ---\033[0m")
+            if total_cookies > 0:
+                print(f"Tổng số nick đã chạy: {TOTAL_ACCOUNTS_PROCESSED}/{total_cookies}")
+            else:
+                print(f"Tổng số nick đã chạy: {TOTAL_ACCOUNTS_PROCESSED}")
+            print("Ấn 9 + Enter để dừng\n")
+            print(f"{'PACKAGE':<30} | {'NICK':<10} | {'STATUS':<12} | {'COUNTDOWN':<12}")
+            print("-" * 60)
+            for pkg, nick, status, seen in rows:
+                print(f"{pkg:<30} | {nick:<10} | {status:<12} | {seen:<12}")
+            sys.stdout.flush()
+        time.sleep(1)
+
+def option1_monitor_loop(pkgs, offline_timeout=200):
+    cfg = load_config()
+    last_update = 0
+    while True:
+        if STOP_EVT.is_set():
+            break
+        now = time.time()
+        total_cookies = COOKIE_TOTAL or len(read_cookies())
+        rows = []
+        for pkg in pkgs:
+            last = HEARTBEAT_DATA.get(pkg, 0)
+            open_ts = OPEN_TS.get(pkg, 0)
+            status = ""
+            seen = ""
+            server = "-"
+            info = HEARTBEAT_INFO.get(pkg, {})
+            stype = info.get('server_type', '')
+            if stype == "VIP1":
+                server = "VIP1"
+            elif stype == "VIP2":
+                server = "VIP2"
+            elif stype == "NORMAL":
+                server = "NORMAL"
+            elif stype:
+                server = stype
+            if last > 0 and (now - last < 60):
+                status = "ONLINE"
+                seen = f"{int(now - last)}s"
+            else:
+                base = last or open_ts
+                if base == 0:
+                    status = "INIT"
+                    seen = "-"
+                else:
+                    diff = now - base
+                    if diff > offline_timeout:
+                        handle_reset(pkg)
+                        OPEN_TS[pkg] = time.time()
+                        HEARTBEAT_DATA[pkg] = 0
+                        status = "REOPEN"
+                        seen = "-"
+                    else:
+                        status = "WAIT HB"
+                        seen = f"{int(offline_timeout - diff)}s"
+            idx = COOKIE_INDEXES.get(pkg, -1)
+            nick = f"{idx+1}/{total_cookies}" if idx >= 0 and total_cookies > 0 else "-"
+            rows.append((pkg, nick, status, server, seen))
+        if time.time() - last_update > 1:
+            last_update = time.time()
+            clear_screen()
+            print("\033[1;33m--- JK93S MONITOR: Farm Level (Gọn) ---\033[0m")
+            print(f"{'PACKAGE':<30} | {'NICK':<10} | {'STATUS':<8} | {'SERVER':<6} | {'SEEN':<8}")
+            print("-" * 60)
+            for pkg, nick, status, server, seen in rows:
+                print(f"{pkg:<30} | {nick:<10} | {status:<8} | {server:<6} | {seen:<8}")
+            sys.stdout.flush()
+        time.sleep(1)
+
+def option6_monitor_loop(pkgs, target_beli):
+    """
+    Monitor dành riêng cho Option 6 (Farm Beli).
+    - Mặc định: Chỉ đợi tín hiệu "EnoughBeliFarmDone" -> Đổi Acc.
+    - Nếu "NotEnoughBeli" -> Giữ nguyên (tiếp tục farm).
+    - Nếu "ChangeAccount" -> Đổi Acc.
+    """
+    last_update = 0
+    TIMEOUT_1 = 300 # 5 phút không online -> Restart
+    
+    RETRY_COUNTS = {}
+    LAST_BELI_SWITCH = {}
+    
+    while True:
+        if STOP_EVT.is_set():
+            break
+        now = time.time()
+        total_cookies = COOKIE_TOTAL or len(read_cookies())
+        rows = []
+        for pkg in pkgs:
+            last = HEARTBEAT_DATA.get(pkg, 0)
+            base = last or OPEN_TS.get(pkg, 0)
+            
+            # Reset retry count if online recently
+            if last > 0 and (now - last < 60):
+                RETRY_COUNTS[pkg] = 0
+                
+            status = ""
+            seen = ""
+            
+            if last > 0 and (now - last < 60):
+                info = HEARTBEAT_INFO.get(pkg, {}) or {}
+                beli = info.get("beli")
+                if beli is not None:
+                    try:
+                        beli_val = int(beli)
+                    except Exception:
+                        beli_val = None
+                else:
+                    beli_val = None
+
+                if beli_val is not None and beli_val >= int(target_beli):
+                    last_sw = LAST_BELI_SWITCH.get(pkg, 0)
+                    if now - last_sw > 30:
+                        LAST_BELI_SWITCH[pkg] = now
+                        def _async_switch_account(p):
+                            try:
+                                log_status(f"[MONITOR] {p}: Đủ Beli ({beli_val:,} >= {int(target_beli):,}) -> Đổi Acc...")
+                                handle_signal(p)
+                            except Exception:
+                                pass
+                        HEARTBEAT_DATA[pkg] = 0
+                        OPEN_TS[pkg] = time.time()
+                        threading.Thread(target=_async_switch_account, args=(pkg,), daemon=True).start()
+                        status = "SWITCH"
+                        seen = "-"
+                        idx = COOKIE_INDEXES.get(pkg, -1)
+                        nick = f"{idx+1}/{total_cookies}" if idx >= 0 and total_cookies > 0 else "-"
+                        rows.append((pkg, nick, status, seen))
+                        continue
+
+                status = "FARMING"
+                seen = f"{int(now - last)}s"
+            else:
+                if base == 0:
+                    status = "INIT"
+                    seen = "-"
+                else:
+                    diff = now - base
+                    if diff > TIMEOUT_1:
+                        # Quá lâu không online -> Restart lại
+                        if RETRY_COUNTS.get(pkg, 0) == 0:
+                            handle_reset(pkg)
+                            OPEN_TS[pkg] = time.time()
+                            HEARTBEAT_DATA[pkg] = 0
+                            RETRY_COUNTS[pkg] = 1
+                            status = "RESTARTING"
+                        else:
+                            # Đã restart mà vẫn ngoẻo -> Đổi acc khác luôn
+                            status = "DEAD -> SKIP"
+                            def _async_skip(p):
+                                handle_signal(p)
+                            threading.Thread(target=_async_skip, args=(pkg,), daemon=True).start()
+                            RETRY_COUNTS[pkg] = 0
+                    else:
+                        status = "WAIT HB"
+                        seen = f"{int(TIMEOUT_1 - diff)}s"
+
+            idx = COOKIE_INDEXES.get(pkg, -1)
+            nick = f"{idx+1}/{total_cookies}" if idx >= 0 and total_cookies > 0 else "-"
+            rows.append((pkg, nick, status, seen))
+
+        if time.time() - last_update > 1:
+            last_update = time.time()
+            clear_screen()
+            print(f"\033[1;36m--- JK93S: FARM BELI (Target: {target_beli:,}) ---\033[0m")
+            print("Logic: Farm đến khi đủ Beli -> Tự đổi Acc (No Loop).")
+            if total_cookies > 0:
+                print(f"Tổng số nick đã chạy: {TOTAL_ACCOUNTS_PROCESSED}/{total_cookies}")
+            else:
+                print(f"Tổng số nick đã chạy: {TOTAL_ACCOUNTS_PROCESSED}")
+            print("Ấn 9 + Enter để dừng\n")
+            print(f"{'PACKAGE':<30} | {'NICK':<10} | {'STATUS':<12} | {'SEEN/WAIT':<12}")
+            print("-" * 60)
+            for pkg, nick, status, seen in rows:
+                print(f"{pkg:<30} | {nick:<10} | {status:<12} | {seen:<12}")
+            sys.stdout.flush()
+        time.sleep(1)
+
+class SignalHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        try:
+            path = self.path
+            from urllib.parse import urlparse, parse_qs
+            u = urlparse(path)
+            qs = parse_qs(u.query)
+            pkg = qs.get('package', [''])[0] or qs.get('pkg', [''])[0]
+            if u.path == '/status':
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"ok": True, "ts": time.time()}).encode("utf-8"))
+                return
+            if u.path == '/hello':
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"OK")
+                return
+            if u.path == '/switch_vip':
+                idx_str = qs.get('index', [''])[0] or qs.get('slot', [''])[0] or qs.get('i', [''])[0]
+                try:
+                    idx = int(idx_str)
+                except Exception:
+                    self.send_response(400)
+                    self.end_headers()
+                    self.wfile.write(b"Missing index")
+                    return
+                # fallback pkg if missing
+                if not pkg:
+                    pkgs = find_roblox_packages()
+                    if len(pkgs) == 1:
+                        pkg = pkgs[0]
+                ok, msg = switch_vip_index(idx, pkg=pkg)
+                self.send_response(200 if ok else 400)
+                self.end_headers()
+                self.wfile.write(msg.encode("utf-8"))
+                return
+            if not pkg and u.path in ['/change_account', '/reset_game']:
+                pkgs = find_roblox_packages()
+                if len(pkgs) == 1:
+                    pkg = pkgs[0]
+                else:
+                    self.send_response(400)
+                    self.end_headers()
+                    self.wfile.write(b"Missing package")
+                    return
+            if u.path == '/change_account':
+                t = threading.Thread(target=handle_signal, args=(pkg,))
+                t.start()
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"OK")
+                return
+            if u.path == '/reset_game':
+                t = threading.Thread(target=handle_reset, args=(pkg,))
+                t.start()
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"OK")
+                return
+            if u.path == '/signal':
+                sig = qs.get('signal', [''])[0] or qs.get('Signal', [''])[0]
+                if sig:
+                     print(f"[DEBUG] Nhận tín hiệu (GET) '{sig}' từ {pkg or 'Unknown'}")
+                
+                # [FIX] Try to resolve pkg by username if missing
+                if not pkg:
+                    uname = qs.get('username', [''])[0] or qs.get('user', [''])[0]
+                    if uname:
+                        for p, u_map in PKG_USERNAMES.items():
+                            if u_map == uname:
+                                pkg = p
+                                print(f"[DEBUG] Auto-map username '{uname}' -> {pkg}")
+                                break
+                    
+                    # Last resort: if only 1 package exists
+                    if not pkg:
+                        pkgs = find_roblox_packages()
+                        if len(pkgs) == 1:
+                            pkg = pkgs[0]
+
+                if sig == "NotEnoughBeli":
+                    print(f"\n[SIGNAL HTTP GET] {pkg}: Không đủ Beli -> Switch VIP 2 (Farm)...")
+                    t = threading.Thread(target=handle_signal, args=(pkg, 1))
+                    t.start()
+                elif sig == "EnoughBeliFarmDone":
+                    print(f"\n[SIGNAL HTTP GET] {pkg}: Đã đủ Beli -> Switch VIP 1 (Random)...")
+                    t = threading.Thread(target=handle_signal, args=(pkg, 0))
+                    t.start()
+                elif sig == "ChangeAccount":
+                    print(f"\n[SIGNAL HTTP GET] {pkg}: Change Account Request")
+                    t = threading.Thread(target=handle_signal, args=(pkg,))
+                    t.start()
+                elif sig == "Kicked":
+                    print(f"\n[SIGNAL HTTP GET] {pkg}: BỊ KICK! -> Auto Rejoin ngay lập tức...")
+                    t = threading.Thread(target=handle_reset, args=(pkg,))
+                    t.start()
+                
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"OK")
+                return
+            if u.path == '/heartbeat':
+                # Try to infer pkg if missing (Single instance case)
+                if not pkg:
+                    pkgs = find_roblox_packages()
+                    if len(pkgs) == 1:
+                        pkg = pkgs[0]
+                
+                uname = qs.get('username', [''])[0] or qs.get('user', [''])[0]
+                stype = qs.get('server_type', [''])[0] or qs.get('type', [''])[0]
+                beli = qs.get('beli', [''])[0] or qs.get('money', [''])[0]
+                
+                if pkg:
+                    HEARTBEAT_DATA[pkg] = time.time()
+                    if uname:
+                        PKG_USERNAMES[pkg] = uname
+                    if stype:
+                        if pkg not in HEARTBEAT_INFO: HEARTBEAT_INFO[pkg] = {}
+                        HEARTBEAT_INFO[pkg]['server_type'] = stype
+                    if beli != "":
+                        try:
+                            if pkg not in HEARTBEAT_INFO: HEARTBEAT_INFO[pkg] = {}
+                            HEARTBEAT_INFO[pkg]['beli'] = int(float(beli))
+                        except Exception:
+                            pass
+                else:
+                    # Broadcast heartbeat if pkg unknown
+                    for p in find_roblox_packages():
+                        HEARTBEAT_DATA[p] = time.time()
+                        # Cannot map username safely here without pkg
+                
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"OK")
+                return
+            self.send_response(404)
+            self.end_headers()
+        except Exception as e:
+            print(f"Server Error: {e}")
+            self.send_response(500)
+            self.end_headers()
+    def do_POST(self):
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length)
+            data = json.loads(post_data.decode('utf-8'))
+            pkg = data.get('package') or data.get('pkg')
+            
+            # In log debug để user thấy tín hiệu đã tới
+            sig = data.get('signal') or data.get('Signal')
+            if sig:
+                 print(f"[DEBUG] Nhận tín hiệu '{sig}' từ {pkg or 'Unknown'}")
+
+            if not pkg:
+                # [FIX] Try to find pkg by username
+                uname = data.get('username') or data.get('user')
+                if uname:
+                    for p, u in PKG_USERNAMES.items():
+                        if u == uname:
+                            pkg = p
+                            print(f"[DEBUG] Auto-map username '{uname}' -> {pkg}")
+                            break
+                
+                if not pkg:
+                    pkgs = find_roblox_packages()
+                    if len(pkgs) == 1:
+                        pkg = pkgs[0]
+                    else:
+                        # [FIX] Instead of rejecting, broadcast to all to keep them alive
+                        # This is safer than 400 Error which causes OFFLINE
+                        print(f"[WARN] Heartbeat missing pkg & username unknown. Broadcast to {len(pkgs)} pkgs.")
+                        for p in pkgs:
+                            HEARTBEAT_DATA[p] = time.time()
+                        self.send_response(200)
+                        self.wfile.write(b"OK (Broadcast)")
+                        return
+
+            if self.path == '/change_account':
+                t = threading.Thread(target=handle_signal, args=(pkg,))
+                t.start()
+                self.send_response(200)
+                self.wfile.write(b"OK")
+                
+            elif self.path == '/reset_game':
+                t = threading.Thread(target=handle_reset, args=(pkg,))
+                t.start()
+                self.send_response(200)
+                self.wfile.write(b"OK")
+                
+            elif self.path == '/heartbeat':
+                if pkg:
+                    HEARTBEAT_DATA[pkg] = time.time()
+                    # [FIX] Update username mapping for robust pkg detection
+                    uname = data.get('username') or data.get('user')
+                    if uname:
+                        PKG_USERNAMES[pkg] = uname
+                    
+                    stype = data.get('server_type') or data.get('type')
+                    if stype:
+                        if pkg not in HEARTBEAT_INFO: HEARTBEAT_INFO[pkg] = {}
+                        HEARTBEAT_INFO[pkg]['server_type'] = stype
+                else:
+                    for p in find_roblox_packages():
+                        HEARTBEAT_DATA[p] = time.time()
+                self.send_response(200)
+                self.wfile.write(b"OK")
+            
+            elif self.path == '/signal':
+                sig = data.get('signal') or data.get('Signal')
+                if sig == "NotEnoughBeli":
+                    print(f"\n[SIGNAL HTTP] {pkg}: Không đủ Beli -> Switch VIP 2 (Farm)...")
+                    t = threading.Thread(target=handle_signal, args=(pkg, 1))
+                    t.start()
+                elif sig == "EnoughBeliFarmDone":
+                    print(f"\n[SIGNAL HTTP] {pkg}: Đã đủ Beli -> Switch VIP 1 (Random)...")
+                    t = threading.Thread(target=handle_signal, args=(pkg, 0))
+                    t.start()
+                elif sig == "ChangeAccount":
+                    print(f"\n[SIGNAL HTTP] {pkg}: Change Account Request")
+                    t = threading.Thread(target=handle_signal, args=(pkg,))
+                    t.start()
+                elif sig == "Kicked":
+                    print(f"\n[SIGNAL HTTP] {pkg}: BỊ KICK! -> Auto Rejoin ngay lập tức...")
+                    t = threading.Thread(target=handle_reset, args=(pkg,))
+                    t.start()
+                
+                self.send_response(200)
+                self.wfile.write(b"OK")
+
+            elif self.path == '/switch_vip':
+                idx = data.get('index') or data.get('slot') or data.get('i')
+                try:
+                    idx = int(idx)
+                except Exception:
+                    self.send_response(400)
+                    self.end_headers()
+                    self.wfile.write(b"Missing index")
+                    return
+                ok, msg = switch_vip_index(idx, pkg=pkg)
+                self.send_response(200 if ok else 400)
+                self.wfile.write(msg.encode("utf-8"))
+                
+            elif self.path == '/hello':
+                self.send_response(200)
+                self.wfile.write(b"OK")
+                
+            else:
+                self.send_response(404)
+                self.end_headers()
+                
+        except Exception as e:
+            print(f"Server Error: {e}")
+            self.send_response(500)
+            self.end_headers()
+            
+    def log_message(self, format, *args):
+        # Suppress log
+        pass
+
+def ensure_adb_reverse_loop(port):
+    while True:
+        try:
+            devices = get_adb_devices()
+            if not devices:
+                # print(f" -> [WARN] Không tìm thấy thiết bị ADB nào để reverse port {port}!")
+                pass
+            else:
+                for dev in devices:
+                    # Chạy ngầm để không spam log
+                    subprocess.run(f"adb -s {dev} reverse tcp:{port} tcp:{port}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+        time.sleep(60) # Check lại mỗi 60s
+
+def start_server_thread(port=8000):
+    # Kích hoạt ADB Reverse ngay lập tức
+    try:
+        devices = get_adb_devices()
+        if not devices:
+            print(f" -> [WARN] Không tìm thấy thiết bị ADB nào để reverse port {port}!")
+        
+        for dev in devices:
+            print(f" -> Setup ADB Reverse tcp:{port} for {dev}...")
+            subprocess.run(f"adb -s {dev} reverse tcp:{port} tcp:{port}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+    except Exception as e:
+        print(f"Lỗi ADB Reverse: {e}")
+
+    # Chạy luồng duy trì ADB Reverse
+    t_rev = threading.Thread(target=ensure_adb_reverse_loop, args=(port,))
+    t_rev.daemon = True
+    t_rev.start()
+
+    server = HTTPServer(('0.0.0.0', port), SignalHandler)
+    t = threading.Thread(target=server.serve_forever)
+    t.daemon = True
+    t.start()
+    return server
+
+def check_termux_permissions():
+    # Silent check
+    try:
+        if not os.access("/sdcard", os.R_OK):
+             print("[WARN] Termux chưa có quyền đọc bộ nhớ. Hãy chạy lệnh: termux-setup-storage")
+    except:
+        pass
+
+def appstorage_poll_loop():
+    # Run check once at start of thread
+    check_termux_permissions()
+    
+    # [FIX] Lưu timestamp heartbeat cuối cùng đọc được từ file để tránh update giả
+    LAST_FILE_HEARTBEAT = {} 
+    
+    # [FIX] Chỉ chấp nhận heartbeat trong khoảng thời gian hợp lý (tránh file cũ lưu từ hôm qua)
+    MAX_HEARTBEAT_AGE = 120
+
+    while True:
+        try:
+            pkgs = find_roblox_packages()
+            data_map = read_appstorages(pkgs)
+            for pkg, raw in data_map.items():
+                if raw:
+                    try:
+                        js = json.loads(raw)
+                        sig = js.get("Signal")
+                        nonce = str(js.get("Nonce") or "")
+                        last = LAST_NONCE.get(pkg, "")
+                        if sig == "ChangeAccount" and nonce and nonce != last:
+                            LAST_NONCE[pkg] = nonce
+                            vip_idx = js.get("SignalVipIndex")
+                            if vip_idx is None:
+                                handle_signal(pkg)
+                            else:
+                                try:
+                                    vi = int(vip_idx)
+                                except Exception:
+                                    vi = None
+                                handle_signal(pkg, vi)
+                        
+                        elif sig == "NotEnoughBeli" and nonce and nonce != last:
+                            LAST_NONCE[pkg] = nonce
+                            print(f"\n[SIGNAL FILE] {pkg}: Không đủ Beli -> Switch VIP 2 (Farm)...")
+                            # 1 = VIP 2
+                            t = threading.Thread(target=handle_signal, args=(pkg, 1))
+                            t.start()
+
+                        elif sig == "EnoughBeliFarmDone" and nonce and nonce != last:
+                            LAST_NONCE[pkg] = nonce
+                            print(f"\n[SIGNAL FILE] {pkg}: Đã đủ Beli -> Switch VIP 1 (Random)...")
+                            # 0 = VIP 1
+                            t = threading.Thread(target=handle_signal, args=(pkg, 0))
+                            t.start()
+
+                        hb = js.get("Heartbeat") or js.get("HB") or js.get("Online") or js.get("ts")
+                        if hb is not None:
+                            # [FIX] Chỉ update nếu heartbeat trong file thực sự mới
+                            try:
+                                hb_val = float(hb)
+                                
+                                # [FIX] Kiểm tra độ trễ thời gian
+                                if abs(time.time() - hb_val) > MAX_HEARTBEAT_AGE:
+                                    continue
+
+                                last_hb = LAST_FILE_HEARTBEAT.get(pkg, 0)
+                                if hb_val > last_hb:
+                                    LAST_FILE_HEARTBEAT[pkg] = hb_val
+                                    HEARTBEAT_DATA[pkg] = time.time()
+                                    stype = js.get("ServerType")
+                                    if stype:
+                                        if pkg not in HEARTBEAT_INFO: HEARTBEAT_INFO[pkg] = {}
+                                        HEARTBEAT_INFO[pkg]['server_type'] = stype
+                            except:
+                                pass
+                    except Exception:
+                        pass
+            # Fallback: đọc shared APPSTORAGE_FILE (khi Lua không gọi HTTP)
+            try:
+                if os.path.exists(APPSTORAGE_FILE):
+                    with open(APPSTORAGE_FILE, "r", encoding="utf-8") as f:
+                        shared_raw = f.read()
+                    
+                    # [DEBUG] In ra raw content để debug xem file có thay đổi không
+                    # print(f"[DEBUG POLLER] Raw appStorage.json: {shared_raw[:100]}...")
+
+                    if shared_raw:
+                        js = json.loads(shared_raw)
+                        
+                        # [DEBUG] Check signal specifically in fallback
+                        sig = js.get("Signal")
+                        if sig:
+                             print(f"[DEBUG POLLER] Found Signal in File: {sig}")
+
+                        hb = js.get("Heartbeat") or js.get("HB") or js.get("Online") or js.get("ts")
+                        if hb is not None:
+                            try:
+                                hb_val = float(hb)
+                                # [FIX] Check time drift - avoid stale file content
+                                if abs(time.time() - hb_val) > MAX_HEARTBEAT_AGE:
+                                    raise ValueError("Heartbeat too old")
+
+                                target_pkg = js.get("PkgName")
+                                if target_pkg:
+                                    # [FIX] Chỉ update nếu heartbeat trong file thực sự mới
+                                    last_hb = LAST_FILE_HEARTBEAT.get(target_pkg, 0)
+                                    if hb_val > last_hb:
+                                        LAST_FILE_HEARTBEAT[target_pkg] = hb_val
+                                        HEARTBEAT_DATA[target_pkg] = time.time()
+                                        stype = js.get("ServerType")
+                                        if stype:
+                                            if target_pkg not in HEARTBEAT_INFO: HEARTBEAT_INFO[target_pkg] = {}
+                                            HEARTBEAT_INFO[target_pkg]['server_type'] = stype
+                                    
+                                    # Xử lý Signal từ File Shared nếu có target_pkg
+                                nonce = str(js.get("Nonce") or "")
+                                last = LAST_NONCE.get(target_pkg, "")
+                                
+                                if sig == "NotEnoughBeli" and nonce and nonce != last:
+                                    LAST_NONCE[target_pkg] = nonce
+                                    print(f"\n[SIGNAL FILE SHARED] {target_pkg}: Không đủ Beli -> Switch VIP 2 (Farm)...")
+                                    t = threading.Thread(target=handle_signal, args=(target_pkg, 1))
+                                    t.start()
+                                elif sig == "EnoughBeliFarmDone" and nonce and nonce != last:
+                                    LAST_NONCE[target_pkg] = nonce
+                                    print(f"\n[SIGNAL FILE SHARED] {target_pkg}: Đã đủ Beli -> Switch VIP 1 (Random)...")
+                                    t = threading.Thread(target=handle_signal, args=(target_pkg, 0))
+                                    t.start()
+                                elif sig == "ChangeAccount" and nonce and nonce != last:
+                                    LAST_NONCE[target_pkg] = nonce
+                                    print(f"\n[SIGNAL FILE SHARED] {target_pkg}: Change Account...")
+                                    t = threading.Thread(target=handle_signal, args=(target_pkg,))
+                                    t.start()
+
+                                uname = js.get("username") or js.get("user")
+                                if uname:
+                                    PKG_USERNAMES[target_pkg] = uname
+                                elif len(pkgs) == 1:
+                                    # Single package case
+                                    p = pkgs[0]
+                                    
+                                    # [FIX] Chỉ update nếu heartbeat trong file thực sự mới
+                                    last_hb = LAST_FILE_HEARTBEAT.get(p, 0)
+                                    if hb_val > last_hb:
+                                        LAST_FILE_HEARTBEAT[p] = hb_val
+                                        HEARTBEAT_DATA[p] = time.time()
+                                    
+                                    # Logic xử lý signal cho single package
+                                    nonce = str(js.get("Nonce") or "")
+                                    last = LAST_NONCE.get(p, "")
+                                    if sig == "NotEnoughBeli" and nonce and nonce != last:
+                                        LAST_NONCE[p] = nonce
+                                        print(f"\n[SIGNAL FILE SHARED] {p}: Không đủ Beli -> Switch VIP 2 (Farm)...")
+                                        t = threading.Thread(target=handle_signal, args=(p, 1))
+                                        t.start()
+                                    elif sig == "EnoughBeliFarmDone" and nonce and nonce != last:
+                                        LAST_NONCE[p] = nonce
+                                        print(f"\n[SIGNAL FILE SHARED] {p}: Đã đủ Beli -> Switch VIP 1 (Random)...")
+                                        t = threading.Thread(target=handle_signal, args=(p, 0))
+                                        t.start()
+
+                                    uname = js.get("username") or js.get("user")
+                                    if uname:
+                                        PKG_USERNAMES[p] = uname
+                            except Exception:
+                                pass
+            except Exception as e:
+                # print(f"Lỗi đọc fallback file: {e}")
+                pass
+        except Exception:
+            pass
+        # [OPTIMIZE] Giảm thời gian poll từ 5s -> 1s để phản hồi nhanh hơn
+        time.sleep(1)
+
+def start_appstorage_poll_thread():
+    t = threading.Thread(target=appstorage_poll_loop)
+    t.daemon = True
+    t.start()
+
+def get_adb_devices():
+    try:
+        res = subprocess.run("adb devices", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        devices = []
+        for line in res.stdout.splitlines():
+            if line.strip() and "List of devices" not in line and "offline" not in line:
+                parts = line.split()
+                if len(parts) >= 1:
+                    devices.append(parts[0])
+        return devices
+    except:
+        return []
+
+def read_appstorages(pkgs):
+    data_map = {}
+    devices = get_adb_devices()
+    
+    # 1. ADB Mode (PC controlling Phones)
+    if devices:
+        # Quét tất cả thiết bị ADB
+        for dev in devices:
+            # 1. Check thư mục chung (Fluxus/Delta hay dùng chung)
+            common_paths = [
+                "/storage/emulated/0/Roblox/Workspace/appStorage.json",
+                "/storage/emulated/0/Roblox/workspace/appStorage.json",
+                "/sdcard/Roblox/Workspace/appStorage.json",
+                "/sdcard/Roblox/workspace/appStorage.json"
+            ]
+            
+            for p in common_paths:
+                try:
+                    res = subprocess.run(f"adb -s {dev} shell cat {p}", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    if res.returncode == 0 and res.stdout.strip():
+                        try:
+                            js = json.loads(res.stdout.strip())
+                            p_name = js.get("PkgName")
+                            if p_name: 
+                                data_map[p_name] = res.stdout.strip()
+                        except:
+                            pass
+                except:
+                    pass
+
+            # 2. Check thư mục riêng của từng package
+            for pkg in pkgs:
+                if pkg in data_map: continue 
+
+                pkg_paths = [
+                    f"/storage/emulated/0/Android/data/{pkg}/files/workspace/appStorage.json",
+                    f"/storage/emulated/0/Android/data/{pkg}/files/Workspace/appStorage.json",
+                    f"/sdcard/Android/data/{pkg}/files/workspace/appStorage.json",
+                    f"/sdcard/Android/data/{pkg}/files/Workspace/appStorage.json",
+                    f"/storage/emulated/0/Android/media/{pkg}/files/workspace/appStorage.json"
+                ]
+                
+                for p in pkg_paths:
+                    try:
+                        res = subprocess.run(f"adb -s {dev} shell cat {p}", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                        if res.returncode == 0 and res.stdout.strip():
+                            data_map[pkg] = res.stdout.strip()
+                            break 
+                    except:
+                        pass
+
+    # 2. Local SU Mode (Termux trực tiếp trên điện thoại - Fallback nếu không thấy qua ADB)
+    # Hoặc nếu đang chạy trên phone thì devices có thể empty
+    if not data_map:
+        # Check thư mục chung local
+        local_common_paths = [
+            "/storage/emulated/0/Delta/Workspace/appStorage.json",
+            "/storage/emulated/0/Delta/workspace/appStorage.json", # Lowercase w
+            "/storage/emulated/0/delta/Workspace/appStorage.json",
+            "/storage/emulated/0/delta/workspace/appStorage.json",
+            
+            "/storage/emulated/0/Roblox/Workspace/appStorage.json",
+            "/storage/emulated/0/Roblox/workspace/appStorage.json",
+            "/sdcard/Roblox/Workspace/appStorage.json",
+            "/sdcard/Roblox/workspace/appStorage.json",
+            
+             # Thêm path cụ thể của các executor phổ biến
+            "/storage/emulated/0/Android/data/com.fluxus.fluxus/files/workspace/appStorage.json",
+            "/storage/emulated/0/Android/data/com.delta.roblox/files/workspace/appStorage.json",
+            "/storage/emulated/0/Android/data/com.hydrogen.roblox/files/workspace/appStorage.json"
+        ]
+        
+        for p in local_common_paths:
+            # Method 0: Direct Read (Fastest, works if Termux has storage permission)
+            try:
+                if os.path.exists(p):
+                    try:
+                        with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                            content = f.read().strip()
+                        if content:
+                            try:
+                                js = json.loads(content)
+                                p_name = js.get("PkgName")
+                                if not p_name or p_name == "unknown":
+                                    if len(pkgs) >= 1:
+                                        p_name = pkgs[0]
+                                if p_name: 
+                                    data_map[p_name] = content
+                                    continue # Done with this path
+                            except:
+                                pass
+                    except:
+                        pass
+            except:
+                pass
+
+            # Method 1: Root Read (Fallback)
+            try:
+                res = run_su(f"cat '{p}'")
+                
+                if res.returncode == 0 and res.stdout.strip():
+                    try:
+                        js = json.loads(res.stdout.strip())
+                        p_name = js.get("PkgName")
+                        
+                        # [FIX] Nếu PkgName là unknown hoặc thiếu, thử đoán bằng danh sách package đang chạy
+                        if not p_name or p_name == "unknown":
+                            if len(pkgs) >= 1:
+                                p_name = pkgs[0] 
+
+                        if p_name: 
+                            data_map[p_name] = res.stdout.strip()
+                    except:
+                        pass
+            except:
+                pass
+                
+        # Check thư mục riêng từng package local
+        for pkg in pkgs:
+            if pkg in data_map: continue
+
+            local_pkg_paths = [
+                f"/storage/emulated/0/Android/data/{pkg}/files/workspace/appStorage.json",
+                f"/storage/emulated/0/Android/data/{pkg}/files/Workspace/appStorage.json",
+                f"/sdcard/Android/data/{pkg}/files/workspace/appStorage.json",
+                f"/sdcard/Android/data/{pkg}/files/Workspace/appStorage.json",
+                f"/storage/emulated/0/Android/media/{pkg}/files/workspace/appStorage.json"
+            ]
+            for p in local_pkg_paths:
+                try:
+                    res = run_su(f"cat {p}")
+                    if res.returncode == 0 and res.stdout.strip():
+                        data_map[pkg] = res.stdout.strip()
+                        break
+                except:
+                    pass
+
+    return data_map
+
+def main():
+    global COOKIES_TXT_FILE, ACTIVE_RUN_PKGS, NO_LOOP_DONE_PKGS, TOTAL_ACCOUNTS_PROCESSED, OPTION5_ACTIVE, OPTION6_ACTIVE
+    while True:
+        try:
+            # Reset về mặc định mỗi khi quay lại menu
+            COOKIES_TXT_FILE = os.path.join(BASE_DIR, "cookies.txt")
+            
+            ensure_files()
+            cfg = load_config()
+            cookies = read_cookies()
+            pkgs = find_roblox_packages()
+            global SERVER_STARTED, INIT_DONE
+            
+            clear_screen()
+            print("=== JEYRKY NGUYEN ===")
+            print(f"Số Cookies: {len(cookies)}")
+            print(f"Số Roblox Clone: {len(pkgs)}")
+            
+            print("\n[ Cấu Hình Hiện Tại ]")
+            vlinks = resolve_vip_links(cfg)
+            vip1 = cfg.get('vip1_url') or '(Trống)'
+            vip2 = cfg.get('vip2_url') or '(Chưa set)'
+            print(f"• VIP1: ...{vip1[-20:] if len(vip1)>20 else vip1}")
+            print(f"• VIP2: ...{vip2[-20:] if len(vip2)>20 else vip2}")
+            # print(f"• Mặc định vào: VIP{int(cfg.get('vip_index',0) or 0)+1}")
+            # print(f"• Server Thường: {'BẬT' if cfg['use_normal'] else 'TẮT'} ({cfg['normal_url'] or 'Chưa set'})")
+            
+            print("\n--- MENU ---")
+            print("1. Farm Level")
+            print("2. Treo account")
+            print("3. Login account 1 Lần")
+            print("4. Auto Random Fruit (Smart Mode)")
+            print("5. Auto Random Fruit (No Loop + Count)")
+            print("6. Auto Farm Beli (Đủ Beli -> Đổi Nick)")
+            print("0. Thoát")
+            print("----------------")
+            
+            choice = input("Nhập lựa chọn: ").strip()
+            
+            if choice == "1":
+                print("\n--- FARM LEVEL MODE ---")
+                if not SERVER_STARTED:
+                    print("Khởi động Server tại port 8000...")
+                    try:
+                        start_server_thread(8000)
+                        SERVER_STARTED = True
+                    except Exception as e:
+                        print(f"Lưu ý: {e}")
+                start_appstorage_poll_thread()
+                
+                try:
+                    cfg["use_vip"] = False
+                    cfg["use_normal"] = True
+                    save_config(cfg)
+                    print(" -> Cấu hình: dùng server thường (placeId), tắt VIP")
+                except Exception as e:
+                    print(f"Lỗi set cấu hình Farm Level: {e}")
+                
+                if not pkgs or not cookies:
+                    print("Thiếu App hoặc Cookies!")
+                    time.sleep(2)
+                    continue
+                
+                if not INIT_DONE:
+                    print("\n[INIT] Đăng nhập ban đầu cho các app...")
+                    count = 0
+                    total_init = min(len(cookies), len(pkgs))
+                    for i in range(total_init):
+                        pkg = pkgs[i]
+                        cookie = cookies[i]
+                        COOKIE_INDEXES[pkg] = i
+                        try:
+                            inject_cookie(cookie, cfg, pkg, nickname=f"[Init {i+1}/{total_init}]")
+                            OPEN_TS[pkg] = time.time()
+                            HEARTBEAT_DATA[pkg] = 0
+                            count += 1
+                        except Exception as e:
+                            print(f"Lỗi init {pkg}: {e}")
+                    INIT_DONE = True
+                
+                try:
+                    pid = cfg.get("normal_place_id", 2753915549)
+                    for pkg in pkgs:
+                        inject_appstorage(pkg, 2)
+                        open_place_id(pkg, pid)
+                        OPEN_TS[pkg] = time.time()
+                        HEARTBEAT_DATA[pkg] = 0
+                except Exception as e:
+                    print(f"Lỗi mở server thường: {e}")
+                
+                t_mon = threading.Thread(target=option1_monitor_loop, args=(pkgs, 200))
+                t_mon.daemon = True
+                t_mon.start()
+                
+                print("\nĐang lắng nghe Farm Level (Lua) và đổi acc khi đạt ngưỡng... Ấn Enter để quay lại menu.")
+                input()
+                
+            elif choice == "2":
+                print("\033[1;33m--- JK93S MONITOR: TREO ACC ROBLOX (VIP1 MONITOR) ---\033[0m")
+                if not pkgs:
+                    print("Không có App nào!")
+                    time.sleep(1)
+                    continue
+                
+                # Hỏi người dùng có muốn login lại không
+                ask_login = input("Bạn có muốn nạp lại Cookie (Login) không? (y/N): ").strip().lower()
+                if ask_login == 'y':
+                    if not INIT_DONE:
+                        print("\n[INIT] Đăng nhập ban đầu cho các app...")
+                        total_init = min(len(cookies), len(pkgs))
+                        for i in range(total_init):
+                            pkg = pkgs[i]
+                            cookie = cookies[i]
+                            COOKIE_INDEXES[pkg] = i
+                            try:
+                                inject_cookie(cookie, cfg, pkg, nickname=f"[Init {i+1}/{total_init}]")
+                            except Exception as e:
+                                print(f"Lỗi init {pkg}: {e}")
+                        INIT_DONE = True
+                else:
+                    print("--> Bỏ qua bước Login, giữ nguyên acc hiện tại trên máy.")
+                    # Đánh dấu đã init để các logic sau không hỏi lại
+                    INIT_DONE = True
+
+                treo_acc_loop(pkgs, cfg, offline_timeout=100)
+                
+            elif choice == "3":
+                print("\n--- LOGIN ACCOUNT (CHỈ COOKIES, KHÔNG MỞ VIP) ---")
+                if not pkgs or not cookies:
+                    print("Thiếu App hoặc Cookies!")
+                    time.sleep(1)
+                    continue
+                p_idx = int(input(f"Chọn App (1-{len(pkgs)}): ")) - 1
+                if not (0 <= p_idx < len(pkgs)):
+                    print("Sai App ID")
+                    continue
+                c_idx = int(input(f"Chọn Cookie (1-{len(cookies)}): ")) - 1
+                if not (0 <= c_idx < len(cookies)):
+                    print("Sai Cookie ID")
+                    continue
+                target_pkg = pkgs[p_idx]
+                target_cookie = cookies[c_idx]
+                # Inject nhưng không mở VIP
+                old_use_vip = cfg.get("use_vip")
+                old_use_normal = cfg.get("use_normal")
+                cfg["use_vip"] = False
+                cfg["use_normal"] = False
+                inject_cookie(target_cookie, cfg, target_pkg, nickname=f"[Login {c_idx+1}/{len(cookies)}]")
+                cfg["use_vip"] = old_use_vip
+                cfg["use_normal"] = old_use_normal
+                print("Login xong, không mở server VIP.")
+                input("Ấn Enter...")
+                
+            elif choice == "4":
+                print("\n--- RANDOM FRUIT (SMART MODE) ---")
+                
+                # --- [START] Thêm Menu chọn Script & Executor ---
+                print("\n[CONFIG] Cấu hình Script Autoexec:")
+                print("1. Random Fruit")
+                print("2. Cày Bounty")
+                s_choice = input("Chọn chế độ (1-2, Enter=Bỏ qua): ").strip()
+                
+                if s_choice in ["1", "2"]:
+                    # [NEW] Cập nhật file Cookie theo chế độ
+                    if s_choice == "1": # Random
+                        COOKIES_TXT_FILE = os.path.join(BASE_DIR, "Cookies_RD.txt")
+                        print(f" -> Đã chuyển sang dùng file cookie: Cookies_RD.txt")
+                    elif s_choice == "2": # Bounty
+                        COOKIES_TXT_FILE = os.path.join(BASE_DIR, "Cookies_PVP.txt")
+                        print(f" -> Đã chuyển sang dùng file cookie: Cookies_PVP.txt")
+                    
+                    # Reload cookies mới
+                    cookies = read_cookies()
+                    print(f" -> Đã load {len(cookies)} cookies mới từ file tương ứng.")
+                    if not cookies:
+                        print(f" [CẢNH BÁO] Không tìm thấy cookie nào trong {COOKIES_TXT_FILE}!")
+
+                    print("\n[CONFIG] Chọn Executor để nạp script:")
+                    print("1. Codex (/sdcard/Codex/Autoexec)")
+                    print("2. Delta (/sdcard/Delta/Autoexecute)")
+                    print("3. Hydrogen (/sdcard/Hydrogen/Autoexec)")
+                    print("4. Fluxus (/sdcard/Fluxus/Autoexec)")
+                    print("5. Arceus X (/sdcard/spdm/Autoexec)")
+                    print("6. Vega X (/sdcard/VegaX/Autoexec)")
+                    e_choice = input("Chọn Executor (1-6): ").strip()
+                    if e_choice:
+                        inject_autoexec_script(e_choice, s_choice)
+                # --- [END] ---
+
+                print("Logic: Lua check Beli -> Đổi VIP 2 farm nếu thiếu -> Đủ Beli về VIP 1 -> Random -> Đổi Acc")
+                if not SERVER_STARTED:
+                    print("Khởi động Server tại port 8000...")
+                    try:
+                        start_server_thread(8000)
+                        SERVER_STARTED = True
+                    except Exception as e:
+                        print(f"Lưu ý: {e}")
+                
+                # Auto Login cho Option 4 (luôn chạy, không hỏi)
+                print("\n[INIT] Đăng nhập ban đầu và mở VIP cho các app...")
+                count = 0
+                total_init = min(len(cookies), len(pkgs))
+                for i in range(total_init):
+                    pkg = pkgs[i]
+                    cookie = cookies[i]
+                    COOKIE_INDEXES[pkg] = i
+                    try:
+                        inject_cookie(cookie, cfg, pkg, nickname=f"[Init {i+1}/{total_init}]")
+                        count += 1
+                    except Exception as e:
+                        print(f"Lỗi init {pkg}: {e}")
+                INIT_DONE = True
+
+                # Bắt đầu lắng nghe sau khi login xong
+                start_appstorage_poll_thread()
+                t = threading.Thread(target=option4_monitor_loop, args=(pkgs,))
+                t.daemon = True
+                t.start()
+                
+                print("\n" + "="*50)
+                print("HỆ THỐNG ĐANG CHẠY (SMART MODE)")
+                print("Trạng thái: Đang lắng nghe tín hiệu từ Lua...")
+                print("Log chi tiết sẽ hiện bên dưới khi có sự kiện (Đổi Acc/Server).")
+                print("Ấn Enter để quay lại menu chính.")
+                print("="*50 + "\n")
+                
+                # Vòng lặp chờ đơn giản, không in bảng rác
+                while True:
+                    if os.name != 'nt':
+                        rlist, _, _ = select.select([sys.stdin], [], [], 0.5)
+                        if rlist:
+                            sys.stdin.readline()
+                            break
+                    else:
+                        if sys.stdin in select.select([sys.stdin], [], [], 0.5)[0]:
+                            input()
+
+            elif choice == "5":
+                print("\n--- RANDOM FRUIT (NO LOOP + COUNT) ---")
+                
+                # --- [START] Thêm Menu chọn Script & Executor ---
+                print("\n[CONFIG] Cấu hình Script Autoexec:")
+                print("1. Random Fruit")
+                print("2. Cày Bounty")
+                s_choice = input("Chọn chế độ (1-2, Enter=Bỏ qua): ").strip()
+                
+                if s_choice in ["1", "2"]:
+                    # [NEW] Cập nhật file Cookie theo chế độ
+                    if s_choice == "1": # Random
+                        COOKIES_TXT_FILE = os.path.join(BASE_DIR, "Cookies_RD.txt")
+                        print(f" -> Đã chuyển sang dùng file cookie: Cookies_RD.txt")
+                    elif s_choice == "2": # Bounty
+                        COOKIES_TXT_FILE = os.path.join(BASE_DIR, "Cookies_PVP.txt")
+                        print(f" -> Đã chuyển sang dùng file cookie: Cookies_PVP.txt")
+                    
+                    # Reload cookies mới
+                    cookies = read_cookies()
+                    print(f" -> Đã load {len(cookies)} cookies mới từ file tương ứng.")
+                    if not cookies:
+                        print(f" [CẢNH BÁO] Không tìm thấy cookie nào trong {COOKIES_TXT_FILE}!")
+
+                    print("\n[CONFIG] Chọn Executor để nạp script:")
+                    print("1. Codex (/sdcard/Codex/Autoexec)")
+                    print("2. Delta (/sdcard/Delta/Autoexecute)")
+                    print("3. Hydrogen (/sdcard/Hydrogen/Autoexec)")
+                    print("4. Fluxus (/sdcard/Fluxus/Autoexec)")
+                    print("5. Arceus X (/sdcard/spdm/Autoexec)")
+                    print("6. Vega X (/sdcard/VegaX/Autoexec)")
+                    e_choice = input("Chọn Executor (1-6): ").strip()
+                    if e_choice:
+                        inject_autoexec_script(e_choice, s_choice)
+                # --- [END] ---
+
+                print("Logic: Giống Opt 4 nhưng không lặp lại cookie và có đếm số nick.")
+                
+                STOP_EVT.clear()
+                OPTION5_ACTIVE = True
+                TOTAL_ACCOUNTS_PROCESSED = 0
+                ACTIVE_RUN_PKGS = list(pkgs)
+                NO_LOOP_DONE_PKGS = set()
+                
+                if not SERVER_STARTED:
+                    print("Khởi động Server tại port 8000...")
+                    try:
+                        start_server_thread(8000)
+                        SERVER_STARTED = True
+                    except Exception as e:
+                        print(f"Lưu ý: {e}")
+                
+                print("\n[INIT] Đăng nhập ban đầu và mở VIP cho các app...")
+                count = 0
+                total_init = min(len(cookies), len(pkgs))
+                for i in range(total_init):
+                    pkg = pkgs[i]
+                    cookie = cookies[i]
+                    COOKIE_INDEXES[pkg] = i
+                    try:
+                        inject_cookie(cookie, cfg, pkg, nickname=f"[Init {i+1}/{total_init}]")
+                        count += 1
+                        TOTAL_ACCOUNTS_PROCESSED += 1
+                    except Exception as e:
+                        print(f"Lỗi init {pkg}: {e}")
+                INIT_DONE = True
+
+                start_appstorage_poll_thread()
+                t = threading.Thread(target=option5_monitor_loop, args=(pkgs,))
+                t.daemon = True
+                t.start()
+                
+                print("\n" + "="*50)
+                print("HỆ THỐNG ĐANG CHẠY (NO LOOP MODE)")
+                print("Trạng thái: Đang lắng nghe tín hiệu từ Lua...")
+                print("Log chi tiết sẽ hiện bên dưới khi có sự kiện (Đổi Acc/Server).")
+                print("Ấn Enter để quay lại menu chính.")
+                print("="*50 + "\n")
+                
+                while True:
+                    if os.name != 'nt':
+                        rlist, _, _ = select.select([sys.stdin], [], [], 0.5)
+                        if rlist:
+                            sys.stdin.readline()
+                            break
+                    else:
+                        if sys.stdin in select.select([sys.stdin], [], [], 0.5)[0]:
+                            input()
+                            break
+                
+                OPTION5_ACTIVE = False
+                ACTIVE_RUN_PKGS = []
+                NO_LOOP_DONE_PKGS = set()
+                STOP_EVT.clear()
+
+            elif choice == "6":
+                print("\n--- AUTO FARM BELI (TARGET MODE) ---")
+                
+                # --- [START] Cấu hình Script & Cookie ---
+                # User request: Farm Beli dùng file Cookies_RD.txt
+                COOKIES_TXT_FILE = os.path.join(BASE_DIR, "Cookies_RD.txt")
+                print(f" -> Đã chuyển sang dùng file cookie: Cookies_RD.txt")
+                
+                # Reload cookies mới
+                cookies = read_cookies()
+                print(f" -> Đã load {len(cookies)} cookies mới từ file tương ứng.")
+                if not cookies:
+                    print(f" [CẢNH BÁO] Không tìm thấy cookie nào trong {COOKIES_TXT_FILE}!")
+
+                # Hỏi target Beli
+                curr_target = cfg.get("target_beli", 500000)
+                try:
+                    raw_t = input(f"Nhập số Beli mục tiêu (Mặc định: {curr_target:,}): ").strip()
+                    if raw_t:
+                        target_beli = int(raw_t.replace(",", "").replace(".", ""))
+                        cfg["target_beli"] = target_beli
+                        save_config(cfg)
+                    else:
+                        target_beli = curr_target
+                except:
+                    print("Nhập sai, dùng mặc định.")
+                    target_beli = curr_target
+                
+                print(f" -> Target Beli: {target_beli:,}")
+
+                print("\n[CONFIG] Chọn Executor để nạp script (Farm Beli):")
+                print("1. Codex (/sdcard/Codex/Autoexec)")
+                print("2. Delta (/sdcard/Delta/Autoexecute)")
+                print("3. Hydrogen (/sdcard/Hydrogen/Autoexec)")
+                print("4. Fluxus (/sdcard/Fluxus/Autoexec)")
+                print("5. Arceus X (/sdcard/spdm/Autoexec)")
+                print("6. Vega X (/sdcard/VegaX/Autoexec)")
+                e_choice = input("Chọn Executor (1-6): ").strip()
+                if e_choice:
+                    # Dùng Mode 3 (Local farmbeli.lua)
+                    inject_autoexec_script(e_choice, "3") 
+                # --- [END] ---
+
+                if not SERVER_STARTED:
+                    print("Khởi động Server tại port 8000...")
+                    try:
+                        start_server_thread(8000)
+                        SERVER_STARTED = True
+                    except Exception as e:
+                        print(f"Lưu ý: {e}")
+                
+                print("\n[INIT] Đăng nhập ban đầu và mở VIP cho các app...")
+                STOP_EVT.clear()
+                OPTION6_ACTIVE = True
+                TOTAL_ACCOUNTS_PROCESSED = 0
+                ACTIVE_RUN_PKGS = list(pkgs)
+                NO_LOOP_DONE_PKGS = set()
+                count = 0
+                total_init = min(len(cookies), len(pkgs))
+                for i in range(total_init):
+                    pkg = pkgs[i]
+                    cookie = cookies[i]
+                    COOKIE_INDEXES[pkg] = i
+                    try:
+                        inject_cookie(cookie, cfg, pkg, nickname=f"[Init {i+1}/{total_init}]")
+                        count += 1
+                        TOTAL_ACCOUNTS_PROCESSED += 1
+                    except Exception as e:
+                        print(f"Lỗi init {pkg}: {e}")
+                INIT_DONE = True
+
+                start_appstorage_poll_thread()
+                t = threading.Thread(target=option6_monitor_loop, args=(pkgs, target_beli))
+                t.daemon = True
+                t.start()
+                
+                print("\n" + "="*50)
+                print("HỆ THỐNG ĐANG CHẠY (FARM BELI MODE)")
+                print("Trạng thái: Đang farm, đợi đủ Beli -> Đổi Nick.")
+                print("Ấn Enter để quay lại menu chính.")
+                print("="*50 + "\n")
+                
+                while True:
+                    if os.name != 'nt':
+                        rlist, _, _ = select.select([sys.stdin], [], [], 0.5)
+                        if rlist:
+                            sys.stdin.readline()
+                            break
+                    else:
+                        if sys.stdin in select.select([sys.stdin], [], [], 0.5)[0]:
+                            input()
+                            break
+                
+                OPTION6_ACTIVE = False
+                ACTIVE_RUN_PKGS = []
+                NO_LOOP_DONE_PKGS = set()
+                STOP_EVT.clear()
+
+            elif choice == "0":
+                break
+                
+        except KeyboardInterrupt:
+            break
+        except ValueError:
+            print("Nhập sai số!")
+            time.sleep(1)
+
+if __name__ == "__main__":
+    init_adb() # Khởi tạo ADB Mode nếu cần
+    main()
