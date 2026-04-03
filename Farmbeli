@@ -184,12 +184,13 @@ local function autoChooseTeam()
 end
 
 --------------------------------------------------------------------------------
--- KICK DETECTION
+-- KICK DETECTION (cùng logic Code random: RobloxPromptGui + keyword + Visible)
 --------------------------------------------------------------------------------
 local function isKicked()
     local ok, kicked, code, snippet = pcall(function()
-        if os.clock() < 10 then return false end
-        if not game.Players.LocalPlayer or not game.Players.LocalPlayer.Parent then return true, "offline", "player_nil" end
+        if not game.Players.LocalPlayer or not game.Players.LocalPlayer.Parent then
+            return true, "player_nil", "offline"
+        end
 
         local emsg = GuiService.ErrorMessage
         if emsg and #emsg > 0 then
@@ -200,12 +201,25 @@ local function isKicked()
 
         local coreGui = game:GetService("CoreGui")
         local promptGui = coreGui:FindFirstChild("RobloxPromptGui")
-        if promptGui then
-            for _, d in ipairs(promptGui:GetDescendants()) do
-                if (d:IsA("TextLabel") or d:IsA("TextButton")) and d.Text and #d.Text > 0 then
-                    local t = string.lower(d.Text)
-                    local kws = {"disconnected", "kicked", "security kick", "banned", "maintenance", "same account", "error code", "mất kết nối", "mã lỗi", "bị kick", "vui lòng tham gia lại", "không thể kết nối", "mất mạng", "văng game", "unexpected client behavior"}
-                    for _, k in ipairs(kws) do if string.find(t, k, 1, true) then return true, "prompt_err", d.Text end end
+        if not promptGui then return false end
+
+        local kws = {
+            "kick", "disconnect", "security", "banned",
+            "mất kết nối", "mã lỗi", "error code",
+            "please rejoin", "not authorized", "maintenance",
+            "bảo trì", "internet", "connection",
+            "same account", "launch", "idle",
+            "chặn", "restricted", "đóng", "close",
+            "rời khỏi", "leave", "kết nối lại", "reconnect",
+            "277", "267", "268",
+            "disconnected", "security kick", "bị kick", "vui lòng tham gia lại",
+            "không thể kết nối", "mất mạng", "văng game", "unexpected client behavior"
+        }
+        for _, d in ipairs(promptGui:GetDescendants()) do
+            if (d:IsA("TextLabel") or d:IsA("TextButton")) and d.Visible then
+                local t = string.lower(d.Text or "")
+                for _, k in ipairs(kws) do
+                    if string.find(t, k) then return true, "prompt_err", d.Text end
                 end
             end
         end
@@ -367,13 +381,27 @@ task.spawn(function()
     end
 end)
 
--- 5. Kick Monitoring
+-- 5. Kick Monitoring — báo Python qua /signal giống Code random (Kicked + HeartbeatKicked)
 task.spawn(function()
+    local KICK_SIGNAL_SENT = false
+    local lastHeartbeatKicked = 0
     while task.wait(2) do
         local kicked, code, reason = isKicked()
         if kicked then
+            if not KICK_SIGNAL_SENT then
+                KICK_SIGNAL_SENT = true
+                SendSignal("Kicked", {reason = tostring(reason or ""), code = tostring(code or "")})
+                print("[KICK] Đã gửi tín hiệu Kicked → Python (/signal)")
+            end
+            if os.clock() - lastHeartbeatKicked >= 20 then
+                lastHeartbeatKicked = os.clock()
+                SendSignal("HeartbeatKicked")
+            end
             SendReset(reason, code)
             task.wait(10)
+        else
+            KICK_SIGNAL_SENT = false
+            lastHeartbeatKicked = 0
         end
     end
 end)
